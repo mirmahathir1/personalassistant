@@ -9,7 +9,7 @@ from .config import get_settings
 from .db import SQLiteDatabase
 from .llm_service import ChatTurnResult, LlamaService, SessionCapacityError
 from .memory_store import MemoryStore, MemoryStoreUnavailableError
-from .model_catalog import DEFAULT_MODEL
+from .model_catalog import AVAILABLE_MODELS, DEFAULT_MODEL, get_model_spec
 from .repositories import (
     ConversationRepository,
     ConversationSummaryRecord,
@@ -24,6 +24,10 @@ from .schemas import (
     DeleteAllMemoryResponse,
     HealthResponse,
     MessageResponse,
+    ModelCatalogResponse,
+    ModelOptionResponse,
+    ModelSelectionRequest,
+    ModelSelectionResponse,
     SessionResponse,
 )
 
@@ -154,6 +158,88 @@ def _conversation_detail_response(
     )
 
 
+def _model_option_response(model_id: str) -> ModelOptionResponse:
+    model_spec = get_model_spec(model_id)
+    assert model_spec is not None
+    return ModelOptionResponse(
+        id=model_spec.id,
+        label=model_spec.label,
+        filename=model_spec.filename,
+    )
+
+
+def _model_catalog_response() -> ModelCatalogResponse:
+    return ModelCatalogResponse(
+        current_model_id=llm_service.model_id,
+        current_model_label=llm_service.model_label,
+        current_model_filename=llm_service.model_name,
+        models=[_model_option_response(model.id) for model in AVAILABLE_MODELS],
+    )
+
+
+def _memory_delete_counts() -> tuple[int, int]:
+    with conversation_repository.connection() as connection:
+        deleted_conversations = int(
+            connection.execute(
+                "SELECT COUNT(DISTINCT conversation_id) FROM threads"
+            ).fetchone()[0]
+        )
+        deleted_messages = int(
+            connection.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
+        )
+
+    return deleted_conversations, deleted_messages
+
+
+@app.get("/api/models", response_model=ModelCatalogResponse)
+def list_models() -> ModelCatalogResponse:
+    return _model_catalog_response()
+
+
+@app.post("/api/models/select", response_model=ModelSelectionResponse)
+def select_model(payload: ModelSelectionRequest) -> ModelSelectionResponse:
+    if settings.model_path:
+        raise HTTPException(
+            status_code=400,
+            detail="MODEL_PATH is set, so built-in model selection is disabled.",
+        )
+
+    model_spec = get_model_spec(payload.model_id)
+    if model_spec is None:
+        raise HTTPException(status_code=404, detail=f"Unknown model_id: {payload.model_id}")
+
+    if model_spec.id == llm_service.model_id:
+        catalog = _model_catalog_response()
+        return ModelSelectionResponse(
+            status="ok",
+            deleted_conversations=0,
+            deleted_messages=0,
+            **catalog.model_dump(),
+        )
+
+    deleted_conversations, deleted_messages = _memory_delete_counts()
+
+    try:
+        memory_store.delete_all()
+        conversation_repository.delete_all()
+        llm_service.switch_model(model_spec)
+    except MemoryStoreUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to switch models and clear stored memory: {exc}",
+        ) from exc
+
+    catalog = _model_catalog_response()
+    return ModelSelectionResponse(
+        status="ok",
+        deleted_conversations=deleted_conversations,
+        deleted_messages=deleted_messages,
+        **catalog.model_dump(),
+    )
+
+
 @app.get("/api/health", response_model=HealthResponse)
 def healthcheck(response: Response) -> HealthResponse:
     session = llm_service.session_status()
@@ -257,15 +343,7 @@ def get_thread(thread_id: str) -> ConversationDetailResponse:
 
 @app.post("/api/delete-all-memory", response_model=DeleteAllMemoryResponse)
 def delete_all_memory() -> DeleteAllMemoryResponse:
-    with conversation_repository.connection() as connection:
-        deleted_conversations = int(
-            connection.execute(
-                "SELECT COUNT(DISTINCT conversation_id) FROM threads"
-            ).fetchone()[0]
-        )
-        deleted_messages = int(
-            connection.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
-        )
+    deleted_conversations, deleted_messages = _memory_delete_counts()
 
     try:
         memory_store.delete_all()

@@ -8,6 +8,29 @@ class ChatRequest(BaseModel):
     thread_id: str | None = None
 
 
+class ModelOptionResponse(BaseModel):
+    id: str
+    label: str
+    filename: str
+
+
+class ModelCatalogResponse(BaseModel):
+    current_model_id: str
+    current_model_label: str
+    current_model_filename: str
+    models: list[ModelOptionResponse]
+
+
+class ModelSelectionRequest(BaseModel):
+    model_id: str = Field(..., min_length=1)
+
+
+class ModelSelectionResponse(ModelCatalogResponse):
+    status: str
+    deleted_conversations: int
+    deleted_messages: int
+
+
 class ChatResponse(BaseModel):
     reply: str
     model: str

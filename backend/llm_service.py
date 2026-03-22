@@ -104,10 +104,18 @@ class LlamaService:
         self._last_used_tokens: int = 0
 
     @property
+    def model_id(self) -> str:
+        return self._model_spec.id
+
+    @property
+    def model_label(self) -> str:
+        return self._model_spec.label
+
+    @property
     def model_name(self) -> str:
         if self._model_path:
             return Path(self._model_path).name
-        return self._settings.model_filename
+        return self._model_spec.filename
 
     @property
     def model_path(self) -> str | None:
@@ -132,6 +140,17 @@ class LlamaService:
             self._active_conversation_id = None
             self._last_used_tokens = 0
             return self.session_status()
+
+    def switch_model(self, model_spec: ModelSpec) -> bool:
+        with self._generation_lock:
+            if self._model_spec.id == model_spec.id:
+                return False
+
+            self._release_model()
+            self._model_spec = model_spec
+            self._active_conversation_id = None
+            self._last_used_tokens = 0
+            return True
 
     def load(self) -> None:
         if self._llm is not None:
@@ -236,10 +255,24 @@ class LlamaService:
         cache_dir.mkdir(parents=True, exist_ok=True)
 
         return hf_hub_download(
-            repo_id=self._settings.model_repo_id,
-            filename=self._settings.model_filename,
+            repo_id=self._model_spec.repo_id,
+            filename=self._model_spec.filename,
             local_dir=str(cache_dir),
         )
+
+    def _release_model(self) -> None:
+        close = getattr(self._llm, "close", None)
+        if callable(close):
+            close()
+
+        self._llm = None
+        self._model_path = None
+        self._bos_tokens = ()
+        self._system_prefix_tokens = ()
+        self._user_prefix_tokens = ()
+        self._assistant_prefix_tokens = ()
+        self._eot_tokens = ()
+        self._eot_token_id = None
 
     def _prepare_template_tokens(self) -> None:
         self._bos_tokens = tuple(self._tokenize_special(self._LLAMA3_BOS))

@@ -5,7 +5,7 @@ A minimal local chat app with:
 - a Vue 3 frontend
 - a FastAPI backend
 - a Dockerized Qdrant service for the sentence-memory foundation
-- the GGUF model `bartowski/Meta-Llama-3.1-8B-Instruct-GGUF`
+- a built-in catalog of Llama-family GGUF models
 
 The backend now assembles prompts per request from SQLite-backed finalized chat history plus retrieved Qdrant memory. It no longer treats rolling `llama.cpp` state snapshots as the canonical conversation store.
 
@@ -32,13 +32,15 @@ Only the final user message and final assistant reply are persisted to the final
 
 ## Model
 
-Default Hugging Face model:
+Built-in model options:
 
-- Repo: `bartowski/Meta-Llama-3.1-8B-Instruct-GGUF`
-- File: `Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf`
-- URL: `https://huggingface.co/bartowski/Meta-Llama-3.1-8B-Instruct-GGUF/resolve/main/Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf?download=true`
+- `Llama 3.1 8B Instruct Q4_K_M`
+- `Llama 3.1 8B Instruct Q5_K_M`
+- `Llama 3.2 3B Instruct Q4_K_M`
 
-By default, the backend downloads the model into `./models` the first time a chat request needs it, unless `MODEL_PATH` is set.
+The backend defaults to `Llama 3.1 8B Instruct Q4_K_M`. By default, the selected model is downloaded into `./models` the first time a chat request needs it, unless `MODEL_PATH` is set.
+
+Changing the selected model from the frontend clears all stored conversations, trace artifacts, and Qdrant memory.
 
 ## Local Run
 
@@ -68,6 +70,8 @@ docker compose up --build
 Then open `http://localhost:5173`.
 
 Compose now bind-mounts `./backend` and `./frontend`, so Python and Vue code reload inside the running containers as soon as you edit them. Rebuild only when you change Dockerfiles or dependency manifests like `backend/requirements.txt` or `frontend/package.json`.
+
+The backend and frontend images no longer copy app source or dependency manifests at build time. Those files are provided to the containers through bind mounts, and each service installs dependencies from the mounted manifest when it starts.
 
 The backend is exposed on `http://localhost:8000`.
 Qdrant is exposed on `http://localhost:6333`.
@@ -113,6 +117,14 @@ Operational readiness is also fixed in `backend/config.py`:
 `GET /api/health`
 
 Returns backend, model, conversation, SQLite, and Qdrant status. SQLite and Qdrant readiness are reported separately, and the endpoint returns `503` with a degraded payload if either storage layer is unavailable.
+
+`GET /api/models`
+
+Returns the built-in Llama-family model options plus the currently selected model.
+
+`POST /api/models/select`
+
+Switches the active backend model. If the model actually changes, all stored conversations and memory are deleted before the next chat request starts fresh.
 
 `GET /api/session`
 

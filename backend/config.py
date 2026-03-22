@@ -6,8 +6,6 @@ from functools import lru_cache
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from .model_catalog import DEFAULT_MODEL
-
 SQLITE_PATH = "/data/app.db"
 QDRANT_URL = "http://qdrant:6333"
 QDRANT_COLLECTION = "conversation_sentences"
@@ -36,8 +34,6 @@ class Settings(BaseSettings):
         "http://localhost:5173,"
         "http://127.0.0.1:5173"
     )
-    model_repo_id: str = DEFAULT_MODEL.repo_id
-    model_filename: str = DEFAULT_MODEL.filename
     model_cache_dir: str = "./models"
     model_path: str | None = None
     model_n_ctx: int = 4096

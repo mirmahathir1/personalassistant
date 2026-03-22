@@ -6,11 +6,12 @@ services:
     depends_on:
       - qdrant
     command: >-
-      uvicorn backend.main:app
+      sh -c "pip install -r /app/backend/requirements.txt
+      && uvicorn backend.main:app
       --host 0.0.0.0
       --port 8000
       --reload
-      --reload-dir /app/backend
+      --reload-dir /app/backend"
     environment:
       HOST: 0.0.0.0
       PORT: 8000
@@ -23,14 +24,15 @@ services:
       - ./backend:/app/backend
       - ./data:/data
       - ./models:/models
+      - backend_venv:/opt/venv
 
   frontend:
     build:
       context: .
       dockerfile: frontend/Dockerfile
-    command: npm run dev -- --host 0.0.0.0 --port 5173
+    command: sh -c "npm install && npm run dev -- --host 0.0.0.0 --port 5173"
     environment:
-      VITE_API_BASE_URL: http://localhost:8000
+      API_PROXY_TARGET: http://backend:8000
       CHOKIDAR_USEPOLLING: "true"
       CHOKIDAR_INTERVAL: "100"
     depends_on:
@@ -49,4 +51,5 @@ services:
       - ./data/qdrant:/qdrant/storage
 
 volumes:
+  backend_venv:
   frontend_node_modules:
