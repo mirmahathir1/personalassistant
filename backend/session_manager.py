@@ -16,7 +16,6 @@ class SessionStatus:
 
 @dataclass
 class SingleSessionManager:
-    system_prompt: str
     lock: Lock = field(default_factory=Lock, init=False, repr=False)
     _base_state: LlamaState | None = field(default=None, init=False, repr=False)
     _current_state: LlamaState | None = field(default=None, init=False, repr=False)

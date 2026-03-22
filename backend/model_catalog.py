@@ -12,15 +12,12 @@ class ModelSpec:
 
 
 DEFAULT_MODEL = ModelSpec(
-    repo_id="hugging-quants/Llama-3.2-3B-Instruct-Q4_K_M-GGUF",
-    filename="llama-3.2-3b-instruct-q4_k_m.gguf",
+    repo_id="bartowski/Meta-Llama-3.1-8B-Instruct-GGUF",
+    filename="Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf",
     download_url=(
-        "https://huggingface.co/hugging-quants/"
-        "Llama-3.2-3B-Instruct-Q4_K_M-GGUF/resolve/main/"
-        "llama-3.2-3b-instruct-q4_k_m.gguf?download=true"
+        "https://huggingface.co/bartowski/"
+        "Meta-Llama-3.1-8B-Instruct-GGUF/resolve/main/"
+        "Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf?download=true"
     ),
-    system_prompt=(
-        "You are a concise, helpful assistant. Answer directly and stay grounded "
-        "in the user's request."
-    ),
+    system_prompt="",
 )

@@ -8,6 +8,19 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from .model_catalog import DEFAULT_MODEL
 
+SQLITE_PATH = "/data/app.db"
+QDRANT_URL = "http://qdrant:6333"
+QDRANT_COLLECTION = "conversation_sentences"
+FASTEMBED_CACHE_PATH = "/data/fastembed"
+FASTEMBED_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
+MEMORY_RETRIEVAL_MODE = "sentence_to_full_message"
+MEMORY_SENTENCE_HITS_PER_SENTENCE = 5
+MEMORY_MAX_FULL_MESSAGES = 5
+MEMORY_SEMANTIC_DEDUPE_THRESHOLD = 0.92
+MEMORY_BLOCK_MAX_TOKENS = 256
+QDRANT_STARTUP_TIMEOUT_SECONDS = 30.0
+QDRANT_STARTUP_POLL_INTERVAL_SECONDS = 1.0
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -23,7 +36,6 @@ class Settings(BaseSettings):
         "http://localhost:5173,"
         "http://127.0.0.1:5173"
     )
-    preload_model: bool = False
     model_repo_id: str = DEFAULT_MODEL.repo_id
     model_filename: str = DEFAULT_MODEL.filename
     model_cache_dir: str = "./models"
@@ -36,7 +48,54 @@ class Settings(BaseSettings):
     max_tokens: int = 512
     chat_format: str | None = None
     verbose: bool = False
-    system_prompt: str = DEFAULT_MODEL.system_prompt
+
+    @property
+    def sqlite_path(self) -> str:
+        return SQLITE_PATH
+
+    @property
+    def qdrant_url(self) -> str:
+        return QDRANT_URL
+
+    @property
+    def qdrant_collection(self) -> str:
+        return QDRANT_COLLECTION
+
+    @property
+    def fastembed_cache_path(self) -> str:
+        return FASTEMBED_CACHE_PATH
+
+    @property
+    def fastembed_model_name(self) -> str:
+        return FASTEMBED_MODEL_NAME
+
+    @property
+    def memory_retrieval_mode(self) -> str:
+        return MEMORY_RETRIEVAL_MODE
+
+    @property
+    def memory_sentence_hits_per_sentence(self) -> int:
+        return MEMORY_SENTENCE_HITS_PER_SENTENCE
+
+    @property
+    def memory_max_full_messages(self) -> int:
+        return MEMORY_MAX_FULL_MESSAGES
+
+    @property
+    def memory_semantic_dedupe_threshold(self) -> float:
+        return MEMORY_SEMANTIC_DEDUPE_THRESHOLD
+
+    @property
+    def memory_block_max_tokens(self) -> int:
+        return MEMORY_BLOCK_MAX_TOKENS
+
+    @property
+    def qdrant_startup_timeout_seconds(self) -> float:
+        return QDRANT_STARTUP_TIMEOUT_SECONDS
+
+    @property
+    def qdrant_startup_poll_interval_seconds(self) -> float:
+        return QDRANT_STARTUP_POLL_INTERVAL_SECONDS
 
     @property
     def cors_origins_list(self) -> list[str]:
