@@ -33,14 +33,14 @@ def chat():
     prompt = body["prompt"]
 
     upstream_payload = {
-        "prompt": prompt,
+        "messages": [{"role": "user", "content": prompt}],
         "temperature": LLAMA_TEMPERATURE,
-        "n_predict": LLAMA_MAX_TOKENS,
+        "max_tokens": LLAMA_MAX_TOKENS,
         "stream": False,
     }
 
     response = requests.post(
-        f"{LLAMA_SERVER_URL}/completion",
+        f"{LLAMA_SERVER_URL}/v1/chat/completions",
         json=upstream_payload,
         timeout=REQUEST_TIMEOUT,
     )
@@ -49,7 +49,7 @@ def chat():
 
     return jsonify(
         {
-            "reply": data["content"]
+            "reply": data["choices"][0]["message"]["content"]
         }
     )
 
