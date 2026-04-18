@@ -8,7 +8,7 @@ app = Flask(__name__)
 
 INDEX_HTML = """<!doctype html>
 <title>Assistant</title>
-<input id=p><button onclick="send()">Send</button><pre id=r></pre>
+<textarea id=p rows=6 cols=60></textarea><br><button onclick="send()">Send</button><pre id=r></pre>
 <script>
 async function send(){
   const r=await fetch('/api/prompt',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({prompt:p.value})});

@@ -4,8 +4,8 @@ services:
     pull_policy: never
     working_dir: /workspace
     environment:
-      MODEL_URL: ${MODEL_URL:-https://huggingface.co/hugging-quants/Llama-3.2-1B-Instruct-Q4_K_M-GGUF/resolve/main/llama-3.2-1b-instruct-q4_k_m.gguf?download=true}
-      MODEL_FILENAME: ${MODEL_FILENAME:-llama-3.2-1b-instruct-q4_k_m.gguf}
+      MODEL_URL: ${MODEL_URL}
+      MODEL_FILENAME: ${MODEL_FILENAME}
       MODELS_DIR: /workspace/models
     volumes:
       - .:/workspace
@@ -25,7 +25,7 @@ services:
       - "${LLAMA_PORT:-8080}:8080"
     command:
       - "-m"
-      - "/workspace/models/${MODEL_FILENAME:-llama-3.2-1b-instruct-q4_k_m.gguf}"
+      - "/workspace/models/${MODEL_FILENAME}"
       - "--host"
       - "0.0.0.0"
       - "--port"
@@ -48,9 +48,9 @@ services:
     environment:
       FLASK_DEBUG: ${FLASK_DEBUG:-1}
       LLAMA_SERVER_URL: http://llama:8080
-      LLAMA_MODEL_NAME: ${LLAMA_MODEL_NAME:-llama-3.2-1b-instruct-q4_k_m}
+      LLAMA_MODEL_NAME: ${LLAMA_MODEL_NAME}
       LLAMA_REQUEST_TIMEOUT_SECONDS: ${LLAMA_REQUEST_TIMEOUT_SECONDS:-180}
     volumes:
       - .:/workspace
     ports:
-      - "${BACKEND_PORT:-5001}:5000"
+      - "${BACKEND_PORT:-5001}:5001"

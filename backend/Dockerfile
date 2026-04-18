@@ -7,4 +7,4 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     FLASK_APP=backend.app
 
-CMD ["sh", "-c", "python -m pip install --no-cache-dir -r backend/requirements.txt && flask run --debug --host 0.0.0.0 --port 5000"]
+CMD ["sh", "-c", "python -m pip install --no-cache-dir -r backend/requirements.txt && flask run --debug --host 0.0.0.0 --port 5001"]
