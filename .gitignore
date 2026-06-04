@@ -1,0 +1,4 @@
+auth/
+*.log
+__pycache__/
+.venv/

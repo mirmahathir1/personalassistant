@@ -1,0 +1,11 @@
+services:
+  cliproxy:
+    image: eceasy/cli-proxy-api:latest
+    container_name: codex-proxy
+    restart: unless-stopped
+    ports:
+      - "8317:8317"     # OpenAI-compatible API
+      - "1455:1455"     # OAuth callback (only needed during login)
+    volumes:
+      - ./config.yaml:/CLIProxyAPI/config.yaml
+      - ./auth:/root/.cli-proxy-api

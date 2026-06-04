@@ -16,7 +16,7 @@ Nothing is installed on the host except Docker. Everything lives in this folder.
 1. Create the directory layout shown in **Project structure**.
 2. Create `config.yaml` exactly as shown.
 3. Create `docker-compose.yml` exactly as shown.
-4. Create `client/codex_client.py` and `client/requirements.txt`.
+4. Create `codex_client.py` and `requirements.txt`.
 5. Run the **one-time login** command and complete OAuth in a browser.
 6. Start the server with `docker compose up -d`.
 7. Verify with the **health check** (`curl /v1/models`).
@@ -29,8 +29,10 @@ Do **not** commit `auth/` (it contains access tokens). A `.gitignore` is include
 ## Prerequisites
 
 - Docker and Docker Compose installed and running.
-- A **paid ChatGPT account** (Plus / Pro / Business / Edu / Enterprise). The proxy
-  uses your subscription; it does not work with a free account.
+- A **ChatGPT account**. Codex is included on all tiers — Free, Go, Plus, Pro,
+  Business, Edu, Enterprise — so this works without paying. Free has tight usage
+  limits and may not expose the very top models, so a paid plan is recommended for
+  sustained use of the strongest model, but it is not required to get started.
 - A browser available on the machine where you run the login step (the OAuth
   redirect returns to `localhost:1455`).
 
@@ -43,16 +45,15 @@ codex-proxy/
 ├── config.yaml            # proxy configuration
 ├── docker-compose.yml     # server definition
 ├── .gitignore
-├── auth/                  # OAuth tokens are written here (DO NOT COMMIT)
-└── client/
-    ├── codex_client.py    # Python example client
-    └── requirements.txt
+├── codex_client.py        # Python example client
+├── requirements.txt
+└── auth/                  # OAuth tokens are written here (DO NOT COMMIT)
 ```
 
 Create the empty `auth/` directory up front:
 
 ```bash
-mkdir -p auth client
+mkdir -p auth
 ```
 
 ---
@@ -101,7 +102,7 @@ payload:
 auth/
 *.log
 __pycache__/
-client/.venv/
+.venv/
 ```
 
 ---
@@ -185,19 +186,26 @@ curl http://localhost:8317/v1/chat/completions \
 
 ## Step 4 — Connect from Python
 
-### `client/requirements.txt`
+### `requirements.txt`
 
 ```
 openai>=1.0.0
 requests
 ```
 
-### `client/codex_client.py`
+### `codex_client.py`
 
 ```python
-"""Call your ChatGPT/Codex subscription through the local CLIProxyAPI server."""
+"""Call your ChatGPT/Codex subscription through the local CLIProxyAPI server.
+
+The model is NOT hardcoded. At startup the client asks the proxy which models your
+account actually exposes (GET /v1/models) and automatically selects the strongest
+one. This works on any plan (Free or paid) because it only ever chooses from what
+your own authentication grants.
+"""
 
 import os
+import re
 from openai import OpenAI
 
 # Base URL of the local proxy (note the trailing /v1).
@@ -206,11 +214,50 @@ BASE_URL = os.getenv("CLIPROXY_BASE_URL", "http://localhost:8317/v1")
 # Must match one of the values under `api-keys:` in config.yaml.
 API_KEY = os.getenv("CLIPROXY_API_KEY", "sk-codexproxy-local-7f3a9c2e8b14d05f")
 
-# Model served through your subscription. We default to the STRONGEST available
-# model. See the "Model selection" section — confirm with GET /v1/models.
-MODEL = os.getenv("CLIPROXY_MODEL", "gpt-5.5")
-
 client = OpenAI(base_url=BASE_URL, api_key=API_KEY)
+
+# Lightweight / non-flagship variants to skip when picking the "strongest" model.
+_WEAK_MARKERS = ("mini", "spark", "nano", "lite", "micro", "instant", "flash")
+
+
+def _score(model_id: str) -> float:
+    """Higher score = stronger model. Version number dominates; small tie-breakers
+    favor 'max' variants and (for this coding use case) 'codex' variants."""
+    name = model_id.lower()
+    if any(marker in name for marker in _WEAK_MARKERS):
+        return -1.0  # exclude small/fast variants from "strongest"
+    match = re.search(r"(\d+(?:\.\d+)?)", name)  # e.g. 5.5, 5.1, 5
+    version = float(match.group(1)) if match else 0.0
+    score = version * 100.0
+    if "max" in name:
+        score += 5.0
+    if "codex" in name:
+        score += 2.0
+    return score
+
+
+def pick_strongest_model() -> str:
+    """Query the proxy and return the strongest available model id.
+
+    Override with the CLIPROXY_MODEL env var if you ever want to force a specific one.
+    """
+    forced = os.getenv("CLIPROXY_MODEL")
+    if forced:
+        return forced
+
+    models = [m.id for m in client.models.list().data]
+    if not models:
+        raise RuntimeError("No models returned by the proxy. Is it logged in and running?")
+
+    ranked = sorted(models, key=_score, reverse=True)
+    best = ranked[0]
+    if _score(best) < 0:  # everything was a 'weak' variant; just take the top one
+        best = sorted(models, reverse=True)[0]
+    return best
+
+
+MODEL = pick_strongest_model()
+print(f"[client] using model: {MODEL}")
 
 
 def chat(prompt: str) -> str:
@@ -246,11 +293,10 @@ if __name__ == "__main__":
 ### Run it
 
 ```bash
-cd client
 python -m venv .venv && source .venv/bin/activate   # optional but recommended
 pip install -r requirements.txt
 export CLIPROXY_API_KEY="sk-codexproxy-local-7f3a9c2e8b14d05f"
-python codex_client.py
+python codex_client.py   # auto-selects the strongest model and prints which one
 ```
 
 ---
@@ -268,36 +314,47 @@ python codex_client.py
 
 ---
 
-## Model selection — use the strongest available
+## Model selection — strongest available, auto-detected
 
-**Goal: always run the most capable model the subscription exposes.**
+**The model is not hardcoded.** The client asks the proxy what your account exposes
+and picks the strongest at runtime, so it works on any plan (Free or paid) and
+automatically upgrades itself when OpenAI ships a newer model.
 
-Default model for this project is **`gpt-5.5`** — OpenAI's current flagship and the
-strongest for complex coding, agentic workflows, reasoning, and tool use. The
-`config.yaml` above also forces maximum reasoning effort (`xhigh`) so the model
-thinks as hard as it can on every request.
+How `pick_strongest_model()` ranks candidates:
 
-Because model availability changes over time and depends on subscription tier, do
-not hard-assume a name. Pick the strongest at runtime:
+1. It calls `GET /v1/models` (via `client.models.list()`), which returns only the
+   models your authenticated subscription can actually use.
+2. It drops lightweight/fast variants (`mini`, `spark`, `nano`, `lite`, `micro`,
+   `instant`, `flash`) — those are the small models, not the strongest.
+3. It scores the rest, with the **version number dominating** (e.g. `gpt-5.5` beats
+   `gpt-5.1-codex-max`), plus small tie-breakers favoring `max` and `codex` variants.
+4. It selects the top-scoring model and prints which one it chose.
 
-1. List what your account actually exposes:
-   ```bash
-   curl http://localhost:8317/v1/models \
-     -H "Authorization: Bearer sk-codexproxy-local-7f3a9c2e8b14d05f"
-   ```
-2. Choose the strongest from the returned list, preferring in this order:
-   `gpt-5.5` → `gpt-5.4` → newest `*-codex` (e.g. `gpt-5.3-codex`) →
-   `gpt-5.1-codex-max`. Avoid `mini` / `spark` variants — those are the small,
-   fast models, not the strongest.
-3. Set it once via the environment variable so you never edit code:
-   ```bash
-   export CLIPROXY_MODEL="gpt-5.5"
-   ```
+This naturally adapts by tier: a Pro account might resolve to `gpt-5.5`, while a Free
+account might resolve to whatever lighter flagship it's allowed — without any code
+changes. The combination of "strongest available model" + the `xhigh` reasoning
+effort forced in `config.yaml` gives you the most capable output your plan permits.
+
+### Forcing a specific model (optional)
+
+Auto-selection is the default. If you ever want to pin one explicitly, set an env var
+and the client uses it as-is:
+
+```bash
+export CLIPROXY_MODEL="gpt-5.5"
+```
+
+To inspect what's available yourself:
+
+```bash
+curl http://localhost:8317/v1/models \
+  -H "Authorization: Bearer sk-codexproxy-local-7f3a9c2e8b14d05f"
+```
 
 > Note: the very strongest models are sometimes gated to higher tiers (for example,
-> top Codex models have launched as ChatGPT Pro–only before wider rollout). If a
-> model name 404s, it isn't available on your plan — fall back to the next one in
-> the list above.
+> some top Codex models have launched as ChatGPT Pro–only before wider rollout) and
+> Free has tight usage limits. Auto-selection handles this gracefully — it only ever
+> picks from models your account is actually granted.
 
 ---
 

@@ -1,0 +1,25 @@
+# Bind to all interfaces inside the container; Docker maps it to localhost:8317.
+host: "0.0.0.0"
+port: 8317
+
+# Where OAuth tokens are stored inside the container (mounted to ./auth on host).
+auth-dir: "/root/.cli-proxy-api"
+
+# Client API keys. These are local secrets YOU invent. Your Python client sends
+# one of these as its Bearer token. They are NOT OpenAI keys.
+api-keys:
+  - "sk-codexproxy-local-7f3a9c2e8b14d05f"
+
+# Number of automatic retries on transient upstream errors (403/408/5xx).
+request-retry: 3
+
+# Strongest-output setting: force maximum reasoning effort on every request so the
+# model thinks as hard as it can. "xhigh" is the top tier on current flagship/codex
+# models; drop to "high" if a model rejects "xhigh".
+payload:
+  override:
+    - models:
+        - name: "gpt-*"
+          protocol: "codex"
+      params:
+        "reasoning.effort": "xhigh"
