@@ -16,7 +16,12 @@ BASE_URL = os.getenv("CLIPROXY_BASE_URL", "http://localhost:8317/v1")
 # Must match one of the values under `api-keys:` in config.yaml.
 API_KEY = os.getenv("CLIPROXY_API_KEY", "sk-codexproxy-local-7f3a9c2e8b14d05f")
 
-client = OpenAI(base_url=BASE_URL, api_key=API_KEY)
+
+def build_client() -> OpenAI:
+    return OpenAI(base_url=BASE_URL, api_key=API_KEY)
+
+
+client = build_client()
 
 # Lightweight / non-flagship variants to skip when picking the "strongest" model.
 _WEAK_MARKERS = ("mini", "spark", "nano", "lite", "micro", "instant", "flash")

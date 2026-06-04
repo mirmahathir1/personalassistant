@@ -1,14 +1,15 @@
 """Example usage of the local Codex proxy client helpers."""
 
-from codex_client import chat, stream
+from codex_client import MODEL, build_client
 
 
 def main() -> None:
-    response = chat("Write a concise one-sentence explanation of recursion.")
-    print(response)
-
-    print("\n--- streaming ---")
-    stream("List three practical uses for Python generators.")
+    client = build_client()
+    response = client.chat.completions.create(
+        model=MODEL,
+        messages=[{"role": "user", "content": "How are you?"}],
+    )
+    print(response.choices[0].message.content)
 
 
 if __name__ == "__main__":
