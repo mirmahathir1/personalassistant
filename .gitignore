@@ -1,4 +1,5 @@
 auth/
+.assistant/
 *.log
 __pycache__/
 .venv/
