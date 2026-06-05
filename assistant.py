@@ -93,12 +93,37 @@ def save_session(path: Path, session: dict[str, Any]) -> None:
     temp_path.replace(path)
 
 
+def extract_sentence(buffer: str) -> tuple[str | None, str]:
+    """Split one complete sentence off the front of buffer for speaking.
+
+    Returns (sentence, rest). When no complete sentence is present yet, returns
+    (None, buffer) unchanged so the caller can keep accumulating deltas.
+    """
+    for index, char in enumerate(buffer):
+        if char not in ".!?\n":
+            continue
+        end = index + 1
+        # Absorb trailing closing quotes/brackets so they go with the sentence.
+        while end < len(buffer) and buffer[end] in '")]’”':
+            end += 1
+        if end >= len(buffer):
+            # More text may still be arriving; only flush hard line breaks now.
+            if char == "\n":
+                return buffer[:end].strip(), buffer[end:]
+            return None, buffer
+        if buffer[end].isspace():
+            return buffer[:end].strip(), buffer[end:].lstrip()
+    return None, buffer
+
+
 def stream_reply(
     client: Any,
     model: str,
     reasoning_effort: str,
     messages: list[dict[str, str]],
+    speaker: Any = None,
 ) -> str:
+    print("Waiting for reply from OpenAI...", end="", flush=True)
     stream = client.chat.completions.create(
         model=model,
         reasoning_effort=reasoning_effort,
@@ -107,14 +132,32 @@ def stream_reply(
     )
 
     parts: list[str] = []
+    pending = ""
+    waiting_shown = True
     for chunk in stream:
         if not chunk.choices:
             continue
         delta = chunk.choices[0].delta.content
         if delta:
+            if waiting_shown:
+                # Clear the "Waiting..." line before the reply starts.
+                print("\r\033[K", end="", flush=True)
+                waiting_shown = False
             print(delta, end="", flush=True)
             parts.append(delta)
+            if speaker is not None:
+                pending += delta
+                while True:
+                    sentence, pending = extract_sentence(pending)
+                    if sentence is None:
+                        break
+                    speaker.say(sentence)
+    if waiting_shown:
+        # Empty reply: clear the leftover "Waiting..." line.
+        print("\r\033[K", end="", flush=True)
     print()
+    if speaker is not None and pending.strip():
+        speaker.say(pending)
     return "".join(parts)
 
 
@@ -165,7 +208,74 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         choices=REASONING_EFFORTS,
         help="Reasoning effort to use for every request.",
     )
+    parser.add_argument(
+        "--voice",
+        action="store_true",
+        help="Enable local push-to-talk voice input (needs faster-whisper).",
+    )
+    parser.add_argument(
+        "--voice-model",
+        default="base.en",
+        help=(
+            "faster-whisper model for --voice (default: base.en). Common: "
+            "tiny.en, base.en, small.en, medium.en, large-v3. The plain names "
+            "(e.g. small) are multilingual; .en variants are English-only and "
+            "faster."
+        ),
+    )
+    parser.add_argument(
+        "--speak",
+        action="store_true",
+        help="Speak replies aloud with local Piper TTS as they stream.",
+    )
+    parser.add_argument(
+        "--speak-voice",
+        default="en_US-lessac-medium",
+        help=(
+            "Piper voice for --speak (default: en_US-lessac-medium). Download "
+            "others with `python -m piper.download_voices <name> "
+            "--download-dir .assistant/voices`."
+        ),
+    )
     return parser.parse_args(argv)
+
+
+def load_speaker(voice_name: str) -> Any:
+    """Build a Piper Speaker, or warn and return None if TTS is unavailable."""
+    try:
+        from speech import Speaker
+        return Speaker(voice_name)
+    except Exception as exc:
+        print(exc, file=sys.stderr)
+        print("Continuing without voice replies.", file=sys.stderr)
+        return None
+
+
+def read_user_text(voice_enabled: bool, voice_model: str = "base.en") -> str:
+    """Read the next user turn, by voice when enabled, otherwise by typing.
+
+    Raises EOFError / KeyboardInterrupt like input() so the main loop can exit.
+    """
+    if not voice_enabled:
+        return input("> ").strip()
+
+    choice = input("[Enter]=record  [t]=type  > ").strip()
+    if choice.lower() == "t":
+        return input("type> ").strip()
+    if choice:
+        # Anything else typed at the prompt is treated as text input.
+        return choice
+
+    from voice import VoiceUnavailable, listen
+
+    try:
+        text = listen(voice_model)
+    except VoiceUnavailable as exc:
+        print(exc, file=sys.stderr)
+        return ""
+
+    print(f"you said: {text}")
+    return text
 
 
 def main() -> int:
@@ -177,45 +287,67 @@ def main() -> int:
     session = load_session(SESSION_PATH, model, reasoning_effort)
     messages = session["messages"]
 
+    speaker = load_speaker(args.speak_voice) if args.speak else None
+
     print(f"model: {model}")
     print(f"reasoning effort: {reasoning_effort}")
     print(f"session: {SESSION_PATH}")
+    if args.voice:
+        print(f"voice: on (faster-whisper {args.voice_model}, local)")
+        try:
+            from voice import warm_up
+            print("Loading speech model...", flush=True)
+            warm_up(args.voice_model)
+        except Exception as exc:
+            print(exc, file=sys.stderr)
+    if speaker is not None:
+        print(f"speak: on (Piper {args.speak_voice}, local)")
     print("Press Ctrl-D or Ctrl-C at the prompt to exit.")
 
-    while True:
-        try:
-            user_text = input("> ").strip()
-        except EOFError:
-            print()
-            return 0
-        except KeyboardInterrupt:
-            print()
-            return 0
+    try:
+        while True:
+            try:
+                user_text = read_user_text(args.voice, args.voice_model)
+            except EOFError:
+                print()
+                return 0
+            except KeyboardInterrupt:
+                print()
+                return 0
 
-        if not user_text:
-            continue
+            if not user_text:
+                continue
 
-        user_message = {"role": "user", "content": user_text}
-        messages.append(user_message)
+            user_message = {"role": "user", "content": user_text}
+            messages.append(user_message)
 
-        try:
-            assistant_text = stream_reply(client, model, reasoning_effort, messages)
-        except KeyboardInterrupt:
-            messages.pop()
-            print("\nInterrupted; response was not saved.", file=sys.stderr)
-            continue
-        except Exception as exc:
-            messages.pop()
-            print_api_error(exc)
-            return 1
+            try:
+                assistant_text = stream_reply(
+                    client, model, reasoning_effort, messages, speaker
+                )
+                if speaker is not None:
+                    speaker.wait()
+            except KeyboardInterrupt:
+                if speaker is not None:
+                    speaker.stop()
+                messages.pop()
+                print("\nInterrupted; response was not saved.", file=sys.stderr)
+                continue
+            except Exception as exc:
+                messages.pop()
+                print_api_error(exc)
+                return 1
 
-        messages.append({"role": "assistant", "content": assistant_text})
+            messages.append({"role": "assistant", "content": assistant_text})
 
-        try:
-            save_session(SESSION_PATH, session)
-        except OSError as exc:
-            print(f"Could not save session: {exc}", file=sys.stderr)
-            return 1
+            try:
+                save_session(SESSION_PATH, session)
+            except OSError as exc:
+                print(f"Could not save session: {exc}", file=sys.stderr)
+                return 1
+    finally:
+        if speaker is not None:
+            speaker.close()
 
 
 if __name__ == "__main__":

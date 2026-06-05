@@ -1,2 +1,9 @@
 openai>=1.0.0
 requests
+
+# Optional: --voice (local push-to-talk transcription) and
+# --speak (local Piper text-to-speech). sounddevice/numpy are shared.
+faster-whisper
+piper-tts
+sounddevice
+numpy
