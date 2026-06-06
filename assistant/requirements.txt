@@ -1,0 +1,8 @@
+# Listen/speak deps for the assistant: listening via local push-to-talk
+# transcription (faster-whisper) and speaking via Piper text-to-speech, both
+# required. sounddevice/numpy are shared. The base OpenAI client is installed
+# via api/requirements.txt.
+faster-whisper
+piper-tts
+sounddevice
+numpy

@@ -1,13 +1,16 @@
-"""Local push-to-talk voice input using faster-whisper.
+"""Listen to the user: local push-to-talk speech-to-text using faster-whisper.
 
 Records microphone audio until Enter is pressed, then transcribes it locally
-(no network, no API key). Heavy dependencies are imported lazily so the rest of
-the assistant still runs in text-only mode when they are not installed.
+(no network, no API key).
 """
 
 from __future__ import annotations
 
 import sys
+
+import numpy as np
+import sounddevice as sd
+from faster_whisper import WhisperModel
 
 SAMPLE_RATE = 16000
 DEFAULT_MODEL = "base.en"
@@ -30,35 +33,15 @@ AVAILABLE_MODELS = (
 _models: dict = {}
 
 
-class VoiceUnavailable(RuntimeError):
-    """Raised when voice dependencies or a microphone are not available."""
-
-
-def _require(module: str):
-    try:
-        return __import__(module)
-    except ImportError as exc:
-        raise VoiceUnavailable(
-            "Voice input needs extra packages. Install them with:\n"
-            "    pip install faster-whisper sounddevice numpy"
-        ) from exc
-
-
 def get_model(name: str = DEFAULT_MODEL):
     if name not in _models:
-        faster_whisper = _require("faster_whisper")
         # int8 on CPU is fast and light; good enough for dictation.
-        _models[name] = faster_whisper.WhisperModel(
-            name, device="cpu", compute_type="int8"
-        )
+        _models[name] = WhisperModel(name, device="cpu", compute_type="int8")
     return _models[name]
 
 
 def record_until_enter():
     """Capture mono float32 audio until the user presses Enter."""
-    sd = _require("sounddevice")
-    np = _require("numpy")
-
     frames: list = []
 
     def callback(indata, _frames, _time, status):
@@ -67,16 +50,13 @@ def record_until_enter():
         frames.append(indata.copy())
 
     print("Recording... press Enter to stop.", flush=True)
-    try:
-        with sd.InputStream(
-            samplerate=SAMPLE_RATE,
-            channels=1,
-            dtype="float32",
-            callback=callback,
-        ):
-            input()
-    except Exception as exc:  # microphone unavailable, etc.
-        raise VoiceUnavailable(f"Could not record audio: {exc}") from exc
+    with sd.InputStream(
+        samplerate=SAMPLE_RATE,
+        channels=1,
+        dtype="float32",
+        callback=callback,
+    ):
+        input()
 
     if not frames:
         return np.zeros(0, dtype="float32")
@@ -100,7 +80,7 @@ def warm_up(model_name: str = DEFAULT_MODEL) -> None:
     """Load (and download if needed) the model up front, before recording.
 
     Done at startup so the first real transcription does not pay the load cost
-    mid-conversation. Failures are surfaced as VoiceUnavailable by get_model.
+    mid-conversation.
     """
     get_model(model_name)
 

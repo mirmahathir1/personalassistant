@@ -1,6 +1,6 @@
 """Example usage of the local Codex proxy client helpers."""
 
-from codex_client import build_client
+from api.codex_client import build_client
 
 
 def main() -> None:

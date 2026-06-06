@@ -8,6 +8,11 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from api.codex_client import build_client
+
+from .listen import listen, warm_up
+from .speak import Speaker
+
 
 SESSION_PATH = Path(".assistant") / "session.json"
 DEFAULT_SYSTEM_PROMPT = (
@@ -121,7 +126,7 @@ def stream_reply(
     model: str,
     reasoning_effort: str,
     messages: list[dict[str, str]],
-    speaker: Any = None,
+    speaker: Speaker,
 ) -> str:
     print("Waiting for reply from OpenAI...", end="", flush=True)
     stream = client.chat.completions.create(
@@ -145,18 +150,17 @@ def stream_reply(
                 waiting_shown = False
             print(delta, end="", flush=True)
             parts.append(delta)
-            if speaker is not None:
-                pending += delta
-                while True:
-                    sentence, pending = extract_sentence(pending)
-                    if sentence is None:
-                        break
-                    speaker.say(sentence)
+            pending += delta
+            while True:
+                sentence, pending = extract_sentence(pending)
+                if sentence is None:
+                    break
+                speaker.say(sentence)
     if waiting_shown:
         # Empty reply: clear the leftover "Waiting..." line.
         print("\r\033[K", end="", flush=True)
     print()
-    if speaker is not None and pending.strip():
+    if pending.strip():
         speaker.say(pending)
     return "".join(parts)
 
@@ -183,16 +187,6 @@ def print_api_error(exc: Exception) -> None:
     print(detail, file=sys.stderr)
 
 
-def load_client() -> Any:
-    try:
-        from codex_client import build_client
-    except Exception as exc:
-        print_api_error(exc)
-        raise SystemExit(1) from exc
-
-    return build_client()
-
-
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Single-thread CLI assistant using the local Codex proxy.",
@@ -209,56 +203,32 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Reasoning effort to use for every request.",
     )
     parser.add_argument(
-        "--voice",
-        action="store_true",
-        help="Enable local push-to-talk voice input (needs faster-whisper).",
-    )
-    parser.add_argument(
-        "--voice-model",
+        "--listen-model",
         default="base.en",
         help=(
-            "faster-whisper model for --voice (default: base.en). Common: "
-            "tiny.en, base.en, small.en, medium.en, large-v3. The plain names "
-            "(e.g. small) are multilingual; .en variants are English-only and "
-            "faster."
+            "faster-whisper model used to listen/transcribe (default: base.en). "
+            "Common: tiny.en, base.en, small.en, medium.en, large-v3. The plain "
+            "names (e.g. small) are multilingual; .en variants are English-only "
+            "and faster."
         ),
-    )
-    parser.add_argument(
-        "--speak",
-        action="store_true",
-        help="Speak replies aloud with local Piper TTS as they stream.",
     )
     parser.add_argument(
         "--speak-voice",
         default="en_US-lessac-medium",
         help=(
-            "Piper voice for --speak (default: en_US-lessac-medium). Download "
-            "others with `python -m piper.download_voices <name> "
+            "Piper voice used to speak replies (default: en_US-lessac-medium). "
+            "Download others with `python -m piper.download_voices <name> "
             "--download-dir .assistant/voices`."
         ),
     )
     return parser.parse_args(argv)
 
 
-def load_speaker(voice_name: str) -> Any:
-    """Build a Piper Speaker, or warn and return None if TTS is unavailable."""
-    try:
-        from speech import Speaker
-        return Speaker(voice_name)
-    except Exception as exc:
-        print(exc, file=sys.stderr)
-        print("Continuing without voice replies.", file=sys.stderr)
-        return None
-
-
-def read_user_text(voice_enabled: bool, voice_model: str = "base.en") -> str:
-    """Read the next user turn, by voice when enabled, otherwise by typing.
+def read_user_text(listen_model: str = "base.en") -> str:
+    """Read the next user turn by listening, with a typed fallback.
 
     Raises EOFError / KeyboardInterrupt like input() so the main loop can exit.
     """
-    if not voice_enabled:
-        return input("> ").strip()
-
     choice = input("[Enter]=record  [t]=type  > ").strip()
     if choice.lower() == "t":
         return input("type> ").strip()
@@ -266,14 +236,7 @@ def read_user_text(voice_enabled: bool, voice_model: str = "base.en") -> str:
         # Anything else typed at the prompt is treated as text input.
         return choice
 
-    from voice import VoiceUnavailable, listen
-
-    try:
-        text = listen(voice_model)
-    except VoiceUnavailable as exc:
-        print(exc, file=sys.stderr)
-        return ""
-
+    text = listen(listen_model)
     print(f"you said: {text}")
     return text
 
@@ -283,31 +246,25 @@ def main() -> int:
     model = args.model
     reasoning_effort = args.effort
 
-    client = load_client()
+    client = build_client()
     session = load_session(SESSION_PATH, model, reasoning_effort)
     messages = session["messages"]
 
-    speaker = load_speaker(args.speak_voice) if args.speak else None
+    speaker = Speaker(args.speak_voice)
 
     print(f"model: {model}")
     print(f"reasoning effort: {reasoning_effort}")
     print(f"session: {SESSION_PATH}")
-    if args.voice:
-        print(f"voice: on (faster-whisper {args.voice_model}, local)")
-        try:
-            from voice import warm_up
-            print("Loading speech model...", flush=True)
-            warm_up(args.voice_model)
-        except Exception as exc:
-            print(exc, file=sys.stderr)
-    if speaker is not None:
-        print(f"speak: on (Piper {args.speak_voice}, local)")
+    print(f"listen: on (faster-whisper {args.listen_model}, local)")
+    print("Loading listening model...", flush=True)
+    warm_up(args.listen_model)
+    print(f"speak: on (Piper {args.speak_voice}, local)")
     print("Press Ctrl-D or Ctrl-C at the prompt to exit.")
 
     try:
         while True:
             try:
-                user_text = read_user_text(args.voice, args.voice_model)
+                user_text = read_user_text(args.listen_model)
             except EOFError:
                 print()
                 return 0
@@ -325,11 +282,9 @@ def main() -> int:
                 assistant_text = stream_reply(
                     client, model, reasoning_effort, messages, speaker
                 )
-                if speaker is not None:
-                    speaker.wait()
+                speaker.wait()
             except KeyboardInterrupt:
-                if speaker is not None:
-                    speaker.stop()
+                speaker.stop()
                 messages.pop()
                 print("\nInterrupted; response was not saved.", file=sys.stderr)
                 continue
@@ -346,8 +301,7 @@ def main() -> int:
                 print(f"Could not save session: {exc}", file=sys.stderr)
                 return 1
     finally:
-        if speaker is not None:
-            speaker.close()
+        speaker.close()
 
 
 if __name__ == "__main__":
