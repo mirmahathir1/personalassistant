@@ -1,9 +1,4 @@
-"""Speak to the user: local neural text-to-speech using Piper.
-
-Speaks the assistant's reply sentence-by-sentence on a background thread, so
-audio plays while the text keeps streaming. Everything runs locally (no network,
-no API key).
-"""
+"""English local neural text-to-speech using Piper."""
 
 from __future__ import annotations
 
@@ -12,6 +7,7 @@ import sys
 import threading
 from pathlib import Path
 
+import numpy as np
 import sounddevice as sd
 from piper import PiperVoice
 
@@ -30,8 +26,25 @@ def voice_path(name: str = DEFAULT_VOICE) -> Path:
     return path
 
 
+def synthesize_audio(text: str, voice_name: str = DEFAULT_VOICE):
+    """Return synthesized English speech audio and its sample rate."""
+    voice = PiperVoice.load(str(voice_path(voice_name)))
+    chunks = list(voice.synthesize(text))
+    if not chunks:
+        return np.zeros(0, dtype=np.float32), 16000
+
+    sample_rate = chunks[0].sample_rate
+    audio = np.concatenate(
+        [
+            chunk.audio_int16_array.astype(np.float32, copy=False) / 32768.0
+            for chunk in chunks
+        ]
+    )
+    return audio, sample_rate
+
+
 class Speaker:
-    """Queue text and have it spoken aloud in order on a worker thread."""
+    """Queue English text and speak it aloud in order on a worker thread."""
 
     def __init__(self, voice_name: str = DEFAULT_VOICE):
         self._voice = PiperVoice.load(str(voice_path(voice_name)))
@@ -47,7 +60,7 @@ class Speaker:
                 break
             try:
                 self._speak_now(text)
-            except Exception as exc:  # don't let a playback hiccup kill the thread
+            except Exception as exc:
                 print(f"TTS playback error: {exc}", file=sys.stderr)
             finally:
                 self._queue.task_done()
@@ -67,7 +80,7 @@ class Speaker:
         self._queue.join()
 
     def stop(self) -> None:
-        """Drop anything pending and cut off current playback (e.g. on Ctrl-C)."""
+        """Drop anything pending and cut off current playback."""
         try:
             while True:
                 self._queue.get_nowait()
@@ -82,3 +95,31 @@ class Speaker:
     def close(self) -> None:
         self._queue.put(None)
         self._thread.join()
+
+
+def extract_sentence(buffer: str) -> tuple[str | None, str]:
+    """Split one complete sentence off the front of buffer for speaking."""
+    for index, char in enumerate(buffer):
+        if char not in ".!?\n":
+            continue
+        end = index + 1
+        while end < len(buffer) and buffer[end] in '")]’”':
+            end += 1
+        if end >= len(buffer):
+            if char == "\n":
+                return buffer[:end].strip(), buffer[end:]
+            return None, buffer
+        if buffer[end].isspace():
+            return buffer[:end].strip(), buffer[end:].lstrip()
+    return None, buffer
+
+
+def speak_text(text: str, speaker: Speaker) -> None:
+    pending = text
+    while True:
+        sentence, pending = extract_sentence(pending)
+        if sentence is None:
+            break
+        speaker.say(sentence)
+    if pending.strip():
+        speaker.say(pending)

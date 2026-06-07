@@ -6,3 +6,10 @@ faster-whisper
 piper-tts
 sounddevice
 numpy
+tiktoken
+# Bengali support (--lang bn), all local at runtime: Argos Translate for
+# bn<->en translation, and Facebook MMS-TTS (via transformers/torch) to speak
+# Bengali since Piper has no Bengali voice.
+argostranslate
+transformers
+torch

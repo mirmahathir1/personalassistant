@@ -23,16 +23,13 @@ The local OpenAI-compatible API will be available at:
 http://localhost:8317/v1
 ```
 
-## Call it from Python (no Docker)
+## API smoke test
 
-`example/` is a minimal client that calls the running proxy with plain Python —
-no container needed:
+`test/api` calls the running proxy and checks that the answer to a simple
+arithmetic prompt contains the expected value:
 
 ```bash
-python3 -m venv example/.venv
-source example/.venv/bin/activate
-pip install -r example/requirements.txt
-python -m example.example
+python3 test/api/test_api.py
 ```
 
 ## Run the assistant
@@ -47,8 +44,23 @@ source assistant/.venv/bin/activate
 pip install -r api/requirements.txt
 pip install -r assistant/requirements.txt
 python -m piper.download_voices en_US-lessac-medium --download-dir .assistant/voices
-python -m assistant.assistant --model gpt-5.4-mini --effort low
+python -m assistant.assistant --model gpt-5.4-mini --effort low --lang bn
 ```
 
-At the prompt press Enter to record from your microphone (or type `t` to type a
-turn instead); replies stream to the terminal and are spoken aloud with Piper.
+`--lang` is required and selects the conversation language:
+
+- `--lang en` — speak and hear English (uses the Piper voice above).
+- `--lang bn` — speak Bengali. Your speech is transcribed to Bengali and then
+  translated to English for the assistant; its English reply is translated back
+  to Bengali and spoken. Transcription (faster-whisper, multilingual),
+  translation (Argos Translate `bn<->en`) and Bengali speech (Facebook MMS-TTS,
+  `facebook/mms-tts-ben`) all run locally — the model files download once on
+  first use, then run offline. No Piper voice download is needed for `bn`.
+  Bengali transcription defaults to the `large-v3` Whisper model (a ~3 GB
+  download and slower CPU decode) because smaller models often transliterate or
+  garble Bengali into another script. If `large-v3` is too slow, pass
+  `--listen-model medium`, but expect lower accuracy. The first run downloads
+  the chosen model once.
+
+The assistant listens through your microphone automatically; replies stream to
+the terminal and are spoken aloud.

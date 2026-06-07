@@ -3,3 +3,6 @@ auth/
 *.log
 __pycache__/
 .venv/
+.env
+*.env
+test/**/generated-*.wav
