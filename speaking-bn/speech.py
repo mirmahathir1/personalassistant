@@ -3,15 +3,33 @@
 from __future__ import annotations
 
 import queue
+import re
 import sys
 import threading
 from contextlib import nullcontext
 
 import sounddevice as sd
 import torch
+from banglanum2words.num_convert import number_to_bangla_words
 from transformers import AutoTokenizer, VitsModel
 
 DEFAULT_MODEL = "facebook/mms-tts-ben"
+
+# The MMS-TTS Bangla tokenizer has no numeral glyphs (০–৯), so digits are
+# silently dropped from the waveform. Spell numbers out as Bangla words first.
+_ASCII_TO_BANGLA_DIGITS = str.maketrans("0123456789", "০১২৩৪৫৬৭৮৯")
+_NUMBER_RUN = re.compile(r"[0-9০-৯]+")
+
+
+def spell_numbers_bn(text: str) -> str:
+    """Replace digit runs with their Bangla word spelling so TTS can speak them."""
+
+    def replace(match: re.Match) -> str:
+        bangla_digits = match.group().translate(_ASCII_TO_BANGLA_DIGITS)
+        words = number_to_bangla_words(bangla_digits)
+        return words or match.group()
+
+    return _NUMBER_RUN.sub(replace, text)
 
 
 def synthesize_audio(
@@ -23,7 +41,7 @@ def synthesize_audio(
     model = VitsModel.from_pretrained(model_name)
     model.eval()
     tokenizer = AutoTokenizer.from_pretrained(model_name)
-    inputs = tokenizer(text, return_tensors="pt")
+    inputs = tokenizer(spell_numbers_bn(text), return_tensors="pt")
     context = torch.random.fork_rng() if seed is not None else nullcontext()
     with context:
         if seed is not None:
@@ -66,7 +84,7 @@ class Speaker:
         sd.wait()
 
     def _synthesize(self, text: str):
-        inputs = self._tokenizer(text, return_tensors="pt")
+        inputs = self._tokenizer(spell_numbers_bn(text), return_tensors="pt")
         with self._torch.no_grad():
             output = self._model(**inputs).waveform
         return output.squeeze().detach().cpu().numpy()

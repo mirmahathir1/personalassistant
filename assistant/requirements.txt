@@ -13,3 +13,6 @@ tiktoken
 argostranslate
 transformers
 torch
+# Spell numerals as Bangla words before MMS-TTS, whose tokenizer drops digit
+# glyphs (০–৯) and would otherwise speak no number at all.
+banglanum2words

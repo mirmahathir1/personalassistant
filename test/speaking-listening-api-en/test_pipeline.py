@@ -19,7 +19,7 @@ from api.codex_client import build_client
 INPUT_EN = "What is the sum of 213 and 435 ?"
 EXPECTED = "648"
 AUDIO_PATH = Path(__file__).resolve().parent / "generated-en.wav"
-MODEL = "gpt-5.5"
+MODEL = "gpt-5.4-mini"
 REASONING_EFFORT = "low"
 
 speaking_en = importlib.import_module("speaking-en")
