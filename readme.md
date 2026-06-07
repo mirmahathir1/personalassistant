@@ -64,3 +64,28 @@ python -m assistant.assistant --model gpt-5.4-mini --effort low --lang bn
 
 The assistant listens through your microphone automatically; replies stream to
 the terminal and are spoken aloud.
+
+## Novelty of this project
+The purpose of this project is to build an AI counselor that does the following unlike any other project out there.
+
+1) It is an AI counselor that remembers you. Current OpenAI ChatGPT interface has an option to remember chat history to remember past context. But it does not make partitions on what you want it to remember for your counselling sessions or your coding sessions. Therefore, if you use the ChatGPT Plus subscription as your counsellor, your coding context will pollute the chats that you use for your counseling chat sessions. 
+
+2) Your chat sessions will be kept private in your laptop. As a user, you won't find any traces of your conversation in the web (e.g. ChatGPT UI), therefore, you can use a ChatGPT account that is shared by multiple people as well. Your private conversations will stay inside your local machine. OpenAI may keep your chats internally in their servers. If you don't want that, this repo also supports uncensored Llama to completely keep your conversations private in your local machine- in this way, you won't get banned for asking sensitive questions. However, you would need a good machine to run the counselor.
+
+3) This project can use a free ChatGPT account without violating any OpenAI terms. Therefore, it is completely free of cost. If you want more intelligence from the AI counselor, just simply upgrade your subscription.
+
+4) Current ChatGPT subscription does not speak or listen to Bangla speech. This project supports Bangla language counselling.
+
+## Current unsolved problems
+1) Previous chat history may go beyond the limit of the context window of ChatGPT, therefore, we need to implement memory retrieval that are relevant.
+
+2) Only user messages are saved now for context. It misses the interactions the user had in response to the questions of the counselor. We need to keep track of the counselors messages efficiently as well.
+
+3) It needs an intuitive UI.
+
+4) Bangla speech support is too weak now.
+
+5) The counselor talks too much without respecting the output token count limit.
+
+6) We can have a password protected encryption mechanism so that even the local data is protected from other users.
+
