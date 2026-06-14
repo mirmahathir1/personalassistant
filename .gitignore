@@ -1,0 +1,35 @@
+# --- Secrets ---
+api_key.txt
+.env
+.env.*
+
+# --- Persisted runtime data ---
+backend/chat_history.json
+backend/chat_history.json.tmp
+
+# --- Python ---
+backend/.venv/
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# --- Node / frontend ---
+frontend/node_modules/
+frontend/dist/
+node_modules/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# --- Editor / OS ---
+.vscode/
+.idea/
+.DS_Store
+*.swp
+*~
