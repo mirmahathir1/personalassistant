@@ -10,6 +10,7 @@ CHAT_PROVIDER / TTS_PROVIDER env vars only set the dropdowns' defaults.
 
 import json
 import os
+import re
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, UploadFile, File
@@ -49,6 +50,9 @@ TTS_MODEL = "canopylabs/orpheus-v1-english"  # groq
 # Online Groq Orpheus voices to expose (female-leaning subset of the 6 available).
 GROQ_VOICES = ["diana", "hannah", "autumn"]
 TTS_VOICE = GROQ_VOICES[0]  # default Groq voice
+
+# Hardcoded offline male voice used for *asterisk-wrapped* segments (always Piper).
+ASTERISK_MALE_VOICE = os.environ.get("ASTERISK_MALE_VOICE", "en_US-joe-medium")
 
 # Piper (offline) voices live in backend/voices/ as <id>.onnx (+ .onnx.json).
 # Selectable voices are those whose .onnx model is present on disk.
@@ -339,6 +343,87 @@ def _tts_piper(text: str, voice_id: str) -> bytes:
     return buf.getvalue()
 
 
+# --- asterisk-segment splicing -------------------------------------------------
+
+# Matches *...* spans (non-greedy, no nested asterisks, must contain something).
+_ASTERISK_RE = re.compile(r"\*([^*]+?)\*")
+
+
+def _split_asterisk_segments(text: str) -> list[tuple[str, bool]]:
+    """Split text into (chunk, is_asterisk) pieces, in order.
+
+    "Hello *he sighs* there" -> [("Hello ", False), ("he sighs", True), (" there", False)]
+    """
+    segments: list[tuple[str, bool]] = []
+    pos = 0
+    for m in _ASTERISK_RE.finditer(text):
+        if m.start() > pos:
+            segments.append((text[pos : m.start()], False))
+        segments.append((m.group(1), True))
+        pos = m.end()
+    if pos < len(text):
+        segments.append((text[pos:], False))
+    # Drop blank/whitespace-only chunks so we don't synthesize silence.
+    return [(s, a) for (s, a) in segments if s.strip()]
+
+
+def _synthesize(text: str, voice_id: str, asterisk: bool) -> bytes:
+    """Synthesize one segment's WAV; asterisk segments force the male Piper voice."""
+    if asterisk:
+        return _tts_piper(text, ASTERISK_MALE_VOICE)
+    provider, _, name = voice_id.partition(":")
+    if not name:
+        provider, name = TTS_PROVIDER, voice_id
+    if provider == "piper":
+        return _tts_piper(text, name)
+    if provider == "groq":
+        return _tts_groq(text, name)
+    raise RuntimeError(f"Unknown voice provider {provider!r} in {voice_id!r}.")
+
+
+def _wav_params(wav_bytes: bytes):
+    """Return (n_channels, sampwidth, framerate, frames) for a WAV blob."""
+    import io
+    import wave
+
+    with wave.open(io.BytesIO(wav_bytes), "rb") as wf:
+        return wf.getnchannels(), wf.getsampwidth(), wf.getframerate(), wf.readframes(wf.getnframes())
+
+
+def _concat_wavs(wav_blobs: list[bytes]) -> bytes:
+    """Concatenate WAVs into one, resampling/normalizing to a common format.
+
+    Segments can come from different engines (Groq 24kHz vs Piper 22.05kHz), so
+    each is converted to the first segment's channels/width/rate via audioop.
+    """
+    import audioop
+    import io
+    import wave
+
+    if len(wav_blobs) == 1:
+        return wav_blobs[0]
+
+    ch0, w0, r0, _ = _wav_params(wav_blobs[0])
+    out_frames = bytearray()
+    for blob in wav_blobs:
+        ch, w, r, frames = _wav_params(blob)
+        if w != w0:
+            frames = audioop.lin2lin(frames, w, w0)
+        if ch != ch0:
+            frames = audioop.tomono(frames, w0, 0.5, 0.5) if ch0 == 1 else audioop.tostereo(frames, w0, 1, 1)
+        if r != r0:
+            frames, _ = audioop.ratecv(frames, w0, ch0, r, r0, None)
+        out_frames += frames
+
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as wf:
+        wf.setnchannels(ch0)
+        wf.setsampwidth(w0)
+        wf.setframerate(r0)
+        wf.writeframes(bytes(out_frames))
+    return buf.getvalue()
+
+
 @app.get("/api/voices")
 def voices():
     """List all selectable voices (online Groq + offline Piper) and the default."""
@@ -351,27 +436,24 @@ def tts(req: TTSRequest):
 
     Voice ids are namespaced: "groq:<orpheus_voice>" (online) or
     "piper:<model_id>" (offline). A bare/empty voice falls back to DEFAULT_VOICE.
+
+    *Asterisk-wrapped* segments are spoken in a hardcoded male Piper voice and
+    spliced back into the selected voice's audio, in order, as one clip.
     """
     text = req.message.strip()
     if not text:
         raise HTTPException(status_code=400, detail="Empty text")
 
-    voice_id = (req.voice or DEFAULT_VOICE)
-    provider, _, name = voice_id.partition(":")
-    if not name:  # legacy/bare id without a prefix
-        provider, name = TTS_PROVIDER, voice_id
+    voice_id = req.voice or DEFAULT_VOICE
+    segments = _split_asterisk_segments(text) or [(text, False)]
 
     try:
-        if provider == "piper":
-            audio_bytes = _tts_piper(text, name)
-        elif provider == "groq":
-            audio_bytes = _tts_groq(text, name)
-        else:
-            raise RuntimeError(f"Unknown voice provider {provider!r} in {voice_id!r}.")
+        clips = [_synthesize(chunk, voice_id, is_ast) for (chunk, is_ast) in segments]
+        audio_bytes = _concat_wavs(clips)
     except HTTPException:
         raise
     except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"TTS failed ({provider}): {exc}") from exc
+        raise HTTPException(status_code=502, detail=f"TTS failed: {exc}") from exc
     return Response(content=audio_bytes, media_type="audio/wav")
 
 

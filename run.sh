@@ -27,14 +27,19 @@ else
 fi
 
 # --- piper: ensure the default offline voice exists (for the offline voices) ---
+# Default offline female voice + the male voice used for *asterisk* segments.
 VOICE_DIR="$ROOT/backend/voices"
-if [ ! -f "$VOICE_DIR/en_US-amy-medium.onnx" ]; then
-  echo "Downloading default Piper voice (~60MB)..."
-  mkdir -p "$VOICE_DIR"
-  BASE="https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/amy/medium"
-  curl -sL -o "$VOICE_DIR/en_US-amy-medium.onnx" "$BASE/en_US-amy-medium.onnx"
-  curl -sL -o "$VOICE_DIR/en_US-amy-medium.onnx.json" "$BASE/en_US-amy-medium.onnx.json"
-fi
+PIPER_BASE="https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US"
+mkdir -p "$VOICE_DIR"
+download_voice() {  # $1=voice id, $2=path under en_US (e.g. amy/medium)
+  if [ ! -f "$VOICE_DIR/$1.onnx" ]; then
+    echo "Downloading Piper voice $1 (~60MB)..."
+    curl -sL -o "$VOICE_DIR/$1.onnx" "$PIPER_BASE/$2/$1.onnx"
+    curl -sL -o "$VOICE_DIR/$1.onnx.json" "$PIPER_BASE/$2/$1.onnx.json"
+  fi
+}
+download_voice en_US-amy-medium amy/medium
+download_voice en_US-joe-medium joe/medium   # male, for *asterisk* segments
 
 # --- backend ---
 cd "$ROOT/backend"
