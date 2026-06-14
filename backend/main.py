@@ -222,6 +222,43 @@ conversation: list[dict] = _load_conversation()
 print(f"[startup] loaded {len([m for m in conversation if m['role'] != 'system'])} saved messages")
 
 # ---------------------------------------------------------------------------
+# UI settings (dropdown selections), persisted to a JSON file
+# ---------------------------------------------------------------------------
+
+SETTINGS_FILE = Path(
+    os.environ.get("SETTINGS_FILE", Path(__file__).resolve().parent / "settings.json")
+)
+
+# Only these keys are accepted/persisted, with their fallback defaults.
+_SETTINGS_DEFAULTS = {
+    "chatProvider": DEFAULT_CHAT_PROVIDER,
+    "voice": DEFAULT_VOICE,
+}
+
+
+def _load_settings() -> dict:
+    """Load saved UI settings merged over defaults; ignore unknown keys."""
+    data = {}
+    if SETTINGS_FILE.exists():
+        try:
+            raw = json.loads(SETTINGS_FILE.read_text())
+            if isinstance(raw, dict):
+                data = {k: raw[k] for k in _SETTINGS_DEFAULTS if k in raw}
+        except (json.JSONDecodeError, OSError) as exc:
+            print(f"[startup] could not read {SETTINGS_FILE}: {exc}; using defaults")
+    return {**_SETTINGS_DEFAULTS, **data}
+
+
+def _save_settings() -> None:
+    tmp = SETTINGS_FILE.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(settings, ensure_ascii=False, indent=2))
+    tmp.replace(SETTINGS_FILE)
+
+
+settings: dict = _load_settings()
+print(f"[startup] settings {settings}")
+
+# ---------------------------------------------------------------------------
 # App
 # ---------------------------------------------------------------------------
 
@@ -247,6 +284,26 @@ class ChatResponse(BaseModel):
 class TTSRequest(BaseModel):
     message: str
     voice: str | None = None  # Piper voice id; ignored by the Groq TTS provider
+
+
+class SettingsRequest(BaseModel):
+    chatProvider: str | None = None
+    voice: str | None = None
+
+
+@app.get("/api/settings")
+def get_settings():
+    """Return the persisted dropdown selections."""
+    return settings
+
+
+@app.post("/api/settings")
+def update_settings(req: SettingsRequest):
+    """Persist any provided dropdown selections; unknown/None fields are ignored."""
+    incoming = {k: v for k, v in req.model_dump().items() if v is not None}
+    settings.update({k: v for k, v in incoming.items() if k in _SETTINGS_DEFAULTS})
+    _save_settings()
+    return settings
 
 
 @app.get("/api/history")

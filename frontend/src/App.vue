@@ -1,5 +1,5 @@
 <script setup>
-import { ref, computed, onMounted, nextTick } from 'vue'
+import { ref, computed, watch, onMounted, nextTick } from 'vue'
 
 const messages = ref([])        // { role, content }
 const input = ref('')
@@ -169,10 +169,51 @@ async function loadProviders() {
   }
 }
 
-onMounted(() => {
+// Whether we've finished loading saved settings; guards the auto-save watchers
+// so applying loaded values doesn't immediately POST them back.
+let settingsLoaded = false
+
+async function loadSettings() {
+  try {
+    const res = await fetch('/api/settings')
+    const s = await res.json()
+    // Apply saved selections, but only if still valid against current lists.
+    if (s.chatProvider && providers.value.some((p) => p.id === s.chatProvider)) {
+      selectedProvider.value = s.chatProvider
+    }
+    if (s.voice && voices.value.some((v) => v.id === s.voice)) {
+      selectedVoice.value = s.voice
+    }
+  } catch {
+    // non-fatal: fall back to endpoint defaults already applied
+  } finally {
+    settingsLoaded = true
+  }
+}
+
+async function saveSettings() {
+  if (!settingsLoaded) return
+  try {
+    await fetch('/api/settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        chatProvider: selectedProvider.value,
+        voice: selectedVoice.value,
+      }),
+    })
+  } catch {
+    // non-fatal: selection still works for this session
+  }
+}
+
+watch([selectedProvider, selectedVoice], saveSettings)
+
+onMounted(async () => {
   loadHistory()
-  loadVoices()
-  loadProviders()
+  // Load the option lists first so saved selections can be validated against them.
+  await Promise.all([loadVoices(), loadProviders()])
+  await loadSettings()
 })
 </script>
 

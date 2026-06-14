@@ -69,6 +69,10 @@ project root.
 Provider defaults for `CHAT_MODEL`: `groq` → `llama-3.3-70b-versatile`,
 `ollama` → `hf.co/bartowski/Llama-3.1-8B-Lexi-Uncensored-V2-GGUF:Q4_K_M`.
 
+The dropdown selections (chat provider + voice) are saved to
+`backend/settings.json` and restored on the next page load. The env-var
+defaults above only apply until a selection is saved.
+
 ## Run the pieces manually
 
 Backend:
