@@ -1,58 +1,39 @@
 #!/usr/bin/env bash
 # Start backend (FastAPI/uvicorn) and frontend (Vite) together.
 #
-# Usage: ./run.sh <groq|ollama> [groq|piper]
-#   arg 1 (chat, required): groq   = Groq llama-3.3-70b-versatile (cloud)
-#                           ollama = local Ollama (uncensored Llama-3.1 Lexi V2)
-#   arg 2 (tts, optional):  groq   = Groq Orpheus (cloud, default)
-#                           piper  = fully offline, on-CPU
+# Usage: ./run.sh
 #
-# STT always runs on Groq (Whisper). Ctrl-C stops both servers.
+# No arguments. The chat provider (Groq | Ollama) and TTS voice (online Groq |
+# offline Piper) are both chosen from dropdowns in the UI. STT always uses Groq.
+# This script makes both providers ready, then starts the servers. Ctrl-C stops.
 set -e
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 
-# --- require & validate the chat provider argument ---
-PROVIDER="${1:-}"
-if [ "$PROVIDER" != "groq" ] && [ "$PROVIDER" != "ollama" ]; then
-  echo "Usage: ./run.sh <groq|ollama> [groq|piper]" >&2
-  echo "  e.g. ./run.sh ollama piper" >&2
-  exit 1
-fi
-export CHAT_PROVIDER="$PROVIDER"
+OLLAMA_MODEL="${CHAT_MODEL:-hf.co/bartowski/Llama-3.1-8B-Lexi-Uncensored-V2-GGUF:Q4_K_M}"
 
-# --- optional TTS provider argument (default groq) ---
-TTS="${2:-groq}"
-if [ "$TTS" != "groq" ] && [ "$TTS" != "piper" ]; then
-  echo "Usage: ./run.sh <groq|ollama> [groq|piper]   (TTS must be groq or piper)" >&2
-  exit 1
-fi
-export TTS_PROVIDER="$TTS"
-
-# --- piper preflight: ensure an offline voice model is present ---
-if [ "$TTS" = "piper" ]; then
-  VOICE_DIR="$ROOT/backend/voices"
-  VOICE="$VOICE_DIR/en_US-lessac-medium.onnx"
-  if [ ! -f "$VOICE" ]; then
-    echo "Downloading Piper voice (en_US-lessac-medium, ~60MB)..."
-    mkdir -p "$VOICE_DIR"
-    BASE="https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium"
-    curl -sL -o "$VOICE" "$BASE/en_US-lessac-medium.onnx"
-    curl -sL -o "$VOICE.json" "$BASE/en_US-lessac-medium.onnx.json"
-  fi
-fi
-
-# --- ollama preflight: ensure server is up and the model is present ---
-if [ "$PROVIDER" = "ollama" ]; then
-  OLLAMA_MODEL="${CHAT_MODEL:-hf.co/bartowski/Llama-3.1-8B-Lexi-Uncensored-V2-GGUF:Q4_K_M}"
+# --- ollama: ensure the server is up and the model is pulled (for the dropdown) ---
+if command -v ollama >/dev/null 2>&1; then
   if ! curl -s -o /dev/null http://localhost:11434/api/tags 2>/dev/null; then
     echo "Starting ollama server..."
     ollama serve > /tmp/ollama.log 2>&1 &
     until curl -s -o /dev/null http://localhost:11434/api/tags 2>/dev/null; do sleep 0.3; done
   fi
   if ! ollama list | grep -qF "$OLLAMA_MODEL"; then
-    echo "Pulling $OLLAMA_MODEL..."
+    echo "Pulling $OLLAMA_MODEL (first run only)..."
     ollama pull "$OLLAMA_MODEL"
   fi
+else
+  echo "Note: 'ollama' not found — the Local provider in the dropdown won't work until it's installed." >&2
+fi
+
+# --- piper: ensure the default offline voice exists (for the offline voices) ---
+VOICE_DIR="$ROOT/backend/voices"
+if [ ! -f "$VOICE_DIR/en_US-amy-medium.onnx" ]; then
+  echo "Downloading default Piper voice (~60MB)..."
+  mkdir -p "$VOICE_DIR"
+  BASE="https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/amy/medium"
+  curl -sL -o "$VOICE_DIR/en_US-amy-medium.onnx" "$BASE/en_US-amy-medium.onnx"
+  curl -sL -o "$VOICE_DIR/en_US-amy-medium.onnx.json" "$BASE/en_US-amy-medium.onnx.json"
 fi
 
 # --- backend ---
@@ -73,7 +54,7 @@ npm run dev &
 FRONT_PID=$!
 
 trap "kill $BACK_PID $FRONT_PID 2>/dev/null" EXIT
-echo "Chat provider: $PROVIDER | TTS provider: $TTS"
 echo "Backend  -> http://localhost:8000"
 echo "Frontend -> http://localhost:5173"
+echo "Pick chat provider and voice from the dropdowns in the UI."
 wait

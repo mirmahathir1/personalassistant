@@ -12,6 +12,9 @@ const voices = ref([])          // { id, label, online }
 const selectedVoice = ref('')   // namespaced voice id, e.g. "groq:diana"
 const currentVoice = computed(() => voices.value.find((v) => v.id === selectedVoice.value))
 
+const providers = ref([])       // { id, label, model }
+const selectedProvider = ref('')// chat provider id, e.g. "groq" | "ollama"
+
 const messagesEl = ref(null)
 let mediaRecorder = null
 let audioChunks = []
@@ -51,7 +54,7 @@ async function send() {
     const res = await fetch('/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message: text }),
+      body: JSON.stringify({ message: text, provider: selectedProvider.value || undefined }),
     })
     if (!res.ok) {
       const err = await res.json().catch(() => ({}))
@@ -155,20 +158,39 @@ async function loadVoices() {
   }
 }
 
+async function loadProviders() {
+  try {
+    const res = await fetch('/api/providers')
+    const data = await res.json()
+    providers.value = data.providers || []
+    selectedProvider.value = data.default || (providers.value[0]?.id ?? '')
+  } catch {
+    // non-fatal: chat just falls back to the server default provider
+  }
+}
+
 onMounted(() => {
   loadHistory()
   loadVoices()
+  loadProviders()
 })
 </script>
 
 <template>
   <div class="app">
     <header class="header">
-      <div>
-        <h1>Openclaw Assistant</h1>
-        <div class="sub">Groq Llama 70B · single thread · voice in/out</div>
-      </div>
+      <div></div>
       <div class="header-actions">
+        <select
+          v-if="providers.length > 1"
+          v-model="selectedProvider"
+          class="voice-select"
+          title="Chat model"
+        >
+          <option v-for="p in providers" :key="p.id" :value="p.id">
+            🧠 {{ p.label }}
+          </option>
+        </select>
         <div v-if="voices.length > 1" class="voice-picker">
           <select v-model="selectedVoice" class="voice-select" title="Voice">
             <option v-for="v in voices" :key="v.id" :value="v.id">

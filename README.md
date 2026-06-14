@@ -34,35 +34,31 @@ run.sh          Starts backend + frontend together
 
 ## Quick start
 
-`run.sh` takes a required chat provider and an optional TTS provider:
-
 ```bash
-./run.sh <groq|ollama> [groq|piper]
-
-./run.sh groq               # cloud chat, cloud TTS
-./run.sh ollama             # local uncensored chat, cloud TTS
-./run.sh ollama piper       # local chat + offline TTS (only STT hits Groq)
+./run.sh
 ```
 
 Then open <http://localhost:5173>.
 
-When you pass `ollama`, the script auto-starts the Ollama server and pulls
-the Lexi Uncensored model if needed. When you pass `piper`, it downloads the
-offline Piper voice (~60 MB) into `backend/voices/` on first run.
+No arguments — pick the **chat model** (Groq cloud vs. local uncensored) and
+the **voice** (online Groq vs. offline Piper) from dropdowns in the UI, per
+message. On first run the script auto-starts Ollama, pulls the Lexi Uncensored
+model, and downloads the default offline Piper voice (~60 MB) so both dropdown
+options work immediately.
 
-The Groq API key (used for STT/TTS, and for chat when provider is `groq`) is
-read from the `GROQ_API_KEY` environment variable, or falls back to
-`api_key.txt` at the project root.
+The Groq API key (used for STT, plus cloud chat/TTS) is read from the
+`GROQ_API_KEY` environment variable, or falls back to `api_key.txt` at the
+project root.
 
 ### Configuration (env vars)
 
 | Var              | Default                        | Meaning                                   |
 | ---------------- | ------------------------------ | ----------------------------------------- |
-| `CHAT_PROVIDER`  | `groq`                         | `groq` or `ollama` (set by `run.sh` arg)  |
-| `CHAT_MODEL`     | per-provider default           | Override the chat model id                |
+| `CHAT_PROVIDER`  | `groq`                         | Default chat provider (the dropdown's initial value) |
+| `CHAT_MODEL`     | per-provider default           | Override the Ollama model id pulled by run.sh |
 | `OLLAMA_BASE_URL`| `http://localhost:11434/v1`    | Ollama OpenAI-compatible endpoint         |
-| `TTS_PROVIDER`   | `groq`                         | `groq` (cloud) or `piper` (offline)       |
-| `PIPER_VOICE`    | `backend/voices/en_US-lessac-medium.onnx` | Path to the Piper voice model  |
+| `TTS_PROVIDER`   | `groq`                         | Default TTS side (`groq`/`piper`) for the voice dropdown |
+| `PIPER_VOICE`    | first available voice          | Default offline voice model id (filename stem) |
 | `GROQ_API_KEY`   | falls back to `api_key.txt`    | Groq key                                  |
 
 Provider defaults for `CHAT_MODEL`: `groq` → `llama-3.3-70b-versatile`,
@@ -76,11 +72,11 @@ Backend:
 cd backend
 python3 -m venv .venv
 ./.venv/bin/pip install -r requirements.txt
-CHAT_PROVIDER=groq ./.venv/bin/uvicorn main:app --port 8000
-# or: CHAT_PROVIDER=ollama ./.venv/bin/uvicorn main:app --port 8000
+./.venv/bin/uvicorn main:app --port 8000
 ```
 
-For the `ollama` provider, make sure Ollama is running and the model is pulled:
+To use the local chat model from the dropdown, make sure Ollama is running and
+the model is pulled:
 
 ```bash
 ollama serve &              # if not already running

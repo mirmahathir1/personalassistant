@@ -1,11 +1,11 @@
 """Single-thread voice chat backend.
 
-Chat runs on a selectable LLM backend (Groq or a local Ollama model); speech
-(STT via Whisper, TTS via Orpheus) always runs on Groq. The whole app keeps
-exactly one conversation thread in memory — restart the server to clear it.
+Chat and TTS providers are both chosen per request from the frontend
+(Groq cloud or local Ollama for chat; Groq Orpheus or local Piper for TTS);
+STT (Whisper) always runs on Groq. The whole app keeps exactly one
+conversation thread in memory, persisted to a JSON file across restarts.
 
-Configure the chat backend with the CHAT_PROVIDER env var: "groq" (default)
-or "ollama".
+CHAT_PROVIDER / TTS_PROVIDER env vars only set the dropdowns' defaults.
 """
 
 import json
@@ -23,15 +23,17 @@ from openai import OpenAI
 # Configuration
 # ---------------------------------------------------------------------------
 
-CHAT_PROVIDER = os.environ.get("CHAT_PROVIDER", "groq").strip().lower()
-
-# Chat model per provider (override with CHAT_MODEL).
-_DEFAULT_CHAT_MODEL = {
+# Chat model per provider; the frontend picks the provider per request.
+CHAT_MODELS = {
     "groq": "llama-3.3-70b-versatile",
     # uncensored Llama-3.1 fine-tune (Lexi V2), pulled from HuggingFace via Ollama
     "ollama": "hf.co/bartowski/Llama-3.1-8B-Lexi-Uncensored-V2-GGUF:Q4_K_M",
 }
-CHAT_MODEL = os.environ.get("CHAT_MODEL", _DEFAULT_CHAT_MODEL.get(CHAT_PROVIDER, ""))
+# Friendly labels for the dropdown.
+CHAT_LABELS = {"groq": "Groq Llama 70B", "ollama": "Local Lexi (uncensored)"}
+
+# Default provider used when a request doesn't specify one.
+DEFAULT_CHAT_PROVIDER = os.environ.get("CHAT_PROVIDER", "groq").strip().lower()
 
 OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434/v1")
 
@@ -139,20 +141,21 @@ def _load_groq_key() -> str:
     )
 
 
-# Groq client: always used for STT/TTS, and for chat when CHAT_PROVIDER=groq.
+# Groq client: always used for STT/TTS.
 groq_key = _load_groq_key()
 groq_client = Groq(api_key=groq_key)
 
-# Chat client (OpenAI-compatible). Both Groq and Ollama speak this protocol,
-# so we point one OpenAI client at whichever backend was selected.
-if CHAT_PROVIDER == "ollama":
-    chat_client = OpenAI(base_url=OLLAMA_BASE_URL, api_key="ollama")  # key is ignored by Ollama
-elif CHAT_PROVIDER == "groq":
-    chat_client = OpenAI(base_url="https://api.groq.com/openai/v1", api_key=groq_key)
-else:
-    raise RuntimeError(f"Unknown CHAT_PROVIDER={CHAT_PROVIDER!r}; expected 'groq' or 'ollama'.")
+# One OpenAI-compatible chat client per provider (both Groq and Ollama speak it).
+# The frontend chooses which to use per request via a dropdown.
+chat_clients = {
+    "groq": OpenAI(base_url="https://api.groq.com/openai/v1", api_key=groq_key),
+    "ollama": OpenAI(base_url=OLLAMA_BASE_URL, api_key="ollama"),  # key ignored by Ollama
+}
 
-print(f"[startup] chat provider={CHAT_PROVIDER} model={CHAT_MODEL}")
+if DEFAULT_CHAT_PROVIDER not in chat_clients:
+    DEFAULT_CHAT_PROVIDER = "groq"
+
+print(f"[startup] chat providers={list(chat_clients)} default={DEFAULT_CHAT_PROVIDER}")
 
 # Offline TTS: load each Piper voice once, lazily, and cache it by id.
 _piper_cache: dict[str, object] = {}
@@ -229,6 +232,7 @@ app.add_middleware(
 
 class ChatRequest(BaseModel):
     message: str
+    provider: str | None = None  # "groq" or "ollama"; defaults to DEFAULT_CHAT_PROVIDER
 
 
 class ChatResponse(BaseModel):
@@ -255,23 +259,40 @@ def reset():
     return {"ok": True}
 
 
+@app.get("/api/providers")
+def providers():
+    """List selectable chat providers (for the frontend dropdown)."""
+    return {
+        "default": DEFAULT_CHAT_PROVIDER,
+        "providers": [
+            {"id": p, "label": CHAT_LABELS.get(p, p), "model": CHAT_MODELS.get(p, "")}
+            for p in chat_clients
+        ],
+    }
+
+
 @app.post("/api/chat", response_model=ChatResponse)
 def chat(req: ChatRequest):
     text = req.message.strip()
     if not text:
         raise HTTPException(status_code=400, detail="Empty message")
 
+    provider = (req.provider or DEFAULT_CHAT_PROVIDER).strip().lower()
+    client = chat_clients.get(provider)
+    if client is None:
+        raise HTTPException(status_code=400, detail=f"Unknown chat provider {provider!r}")
+
     conversation.append({"role": "user", "content": text})
     try:
-        completion = chat_client.chat.completions.create(
-            model=CHAT_MODEL,
+        completion = client.chat.completions.create(
+            model=CHAT_MODELS[provider],
             messages=conversation,
             temperature=0.7,
         )
     except Exception as exc:  # surface backend errors to the client
         conversation.pop()  # roll back the user turn we optimistically added
         raise HTTPException(
-            status_code=502, detail=f"Chat failed ({CHAT_PROVIDER}): {exc}"
+            status_code=502, detail=f"Chat failed ({provider}): {exc}"
         ) from exc
 
     reply = completion.choices[0].message.content
@@ -358,7 +379,7 @@ def tts(req: TTSRequest):
 def health():
     return {
         "ok": True,
-        "chat_provider": CHAT_PROVIDER,
-        "model": CHAT_MODEL,
-        "tts_provider": TTS_PROVIDER,
+        "chat_default": DEFAULT_CHAT_PROVIDER,
+        "chat_providers": list(chat_clients),
+        "tts_default_provider": TTS_PROVIDER,
     }
