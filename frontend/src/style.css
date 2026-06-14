@@ -44,6 +44,27 @@ body {
   color: #8b90a0;
 }
 
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.voice-select {
+  background: #161922;
+  border: 1px solid #2c3040;
+  color: #b6bccb;
+  border-radius: 8px;
+  padding: 6px 10px;
+  font-size: 13px;
+  font-family: inherit;
+  cursor: pointer;
+}
+.voice-select:focus {
+  outline: none;
+  border-color: #3a55a5;
+}
+
 .reset-btn {
   background: transparent;
   border: 1px solid #2c3040;

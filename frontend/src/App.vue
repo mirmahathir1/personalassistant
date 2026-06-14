@@ -8,6 +8,9 @@ const status = ref('')
 const statusError = ref(false)
 const recording = ref(false)
 
+const voices = ref([])          // { id, label }
+const selectedVoice = ref('')   // current Piper voice id
+
 const messagesEl = ref(null)
 let mediaRecorder = null
 let audioChunks = []
@@ -87,7 +90,7 @@ async function speak(text) {
     const res = await fetch('/api/tts', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message: text }),
+      body: JSON.stringify({ message: text, voice: selectedVoice.value || undefined }),
     })
     if (!res.ok) throw new Error(`HTTP ${res.status}`)
     const blob = await res.blob()
@@ -140,7 +143,21 @@ async function transcribe(blob) {
   }
 }
 
-onMounted(loadHistory)
+async function loadVoices() {
+  try {
+    const res = await fetch('/api/voices')
+    const data = await res.json()
+    voices.value = data.voices || []
+    selectedVoice.value = data.default || (voices.value[0]?.id ?? '')
+  } catch {
+    // non-fatal: TTS just falls back to the server default voice
+  }
+}
+
+onMounted(() => {
+  loadHistory()
+  loadVoices()
+})
 </script>
 
 <template>
@@ -150,7 +167,17 @@ onMounted(loadHistory)
         <h1>Openclaw Assistant</h1>
         <div class="sub">Groq Llama 70B · single thread · voice in/out</div>
       </div>
-      <button class="reset-btn" @click="reset">Clear</button>
+      <div class="header-actions">
+        <select
+          v-if="voices.length > 1"
+          v-model="selectedVoice"
+          class="voice-select"
+          title="Voice"
+        >
+          <option v-for="v in voices" :key="v.id" :value="v.id">🎙 {{ v.label }}</option>
+        </select>
+        <button class="reset-btn" @click="reset">Clear</button>
+      </div>
     </header>
 
     <div class="messages" ref="messagesEl">

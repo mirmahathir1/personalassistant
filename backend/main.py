@@ -43,11 +43,55 @@ TTS_PROVIDER = os.environ.get("TTS_PROVIDER", "groq").strip().lower()
 TTS_MODEL = "canopylabs/orpheus-v1-english"  # groq
 TTS_VOICE = "diana"  # groq
 
-# Piper (offline) voice model files; the .onnx and .onnx.json live in backend/voices/.
-PIPER_VOICE = os.environ.get(
-    "PIPER_VOICE",
-    str(Path(__file__).resolve().parent / "voices" / "en_US-lessac-medium.onnx"),
-)
+# Piper (offline) voices live in backend/voices/ as <id>.onnx (+ .onnx.json).
+# Selectable voices are those whose .onnx model is present on disk.
+VOICES_DIR = Path(__file__).resolve().parent / "voices"
+
+# Friendly display names; ids are the .onnx filename stems.
+_VOICE_LABELS = {
+    "en_US-amy-medium": "Amy",
+    "en_US-hfc_female-medium": "Hannah",
+    "en_US-libritts_r-medium": "Sofia",
+    "en_US-kristin-medium": "Kristin",
+    "en_US-kathleen-low": "Kathleen",
+    "en_US-lessac-medium": "Lessac",
+}
+
+
+SAMPLES_DIR = Path(__file__).resolve().parent / "samples"
+
+# Map a voice id to its short sample-file stem (used to curate the menu).
+_VOICE_SAMPLE = {
+    "en_US-amy-medium": "amy",
+    "en_US-hfc_female-medium": "hfc_female",
+    "en_US-libritts_r-medium": "libritts_r",
+    "en_US-kristin-medium": "kristin",
+    "en_US-kathleen-low": "kathleen",
+    "en_US-lessac-medium": "lessac",
+}
+
+
+def _available_voices() -> list[dict]:
+    """Selectable Piper voices: model present on disk AND a kept sample WAV.
+
+    Deleting a sample under backend/samples/ removes that voice from the menu,
+    so the curated set is whatever samples you keep.
+    """
+    out = []
+    for onnx in sorted(VOICES_DIR.glob("*.onnx")):
+        vid = onnx.stem
+        sample = _VOICE_SAMPLE.get(vid, vid)
+        if not (SAMPLES_DIR / f"{sample}.wav").exists():
+            continue
+        out.append({"id": vid, "label": _VOICE_LABELS.get(vid, vid)})
+    return sorted(out, key=lambda v: v["label"])
+
+
+# Default selected voice: env override, else first available, else lessac.
+DEFAULT_PIPER_VOICE = os.environ.get("PIPER_VOICE", "")
+if not DEFAULT_PIPER_VOICE:
+    _avail = _available_voices()
+    DEFAULT_PIPER_VOICE = _avail[0]["id"] if _avail else "en_US-lessac-medium"
 
 SYSTEM_PROMPT = "You are a helpful, concise voice assistant. Keep replies natural and to the point."
 
@@ -80,25 +124,25 @@ else:
 
 print(f"[startup] chat provider={CHAT_PROVIDER} model={CHAT_MODEL}")
 
-# Offline TTS: load the Piper voice once, lazily, the first time it's needed.
-_piper_voice = None
+# Offline TTS: load each Piper voice once, lazily, and cache it by id.
+_piper_cache: dict[str, object] = {}
 
 
-def _get_piper_voice():
-    global _piper_voice
-    if _piper_voice is None:
+def _get_piper_voice(voice_id: str):
+    if voice_id not in _piper_cache:
         from piper import PiperVoice  # imported lazily so groq-only runs don't need it
 
-        if not Path(PIPER_VOICE).exists():
+        onnx = VOICES_DIR / f"{voice_id}.onnx"
+        if not onnx.exists():
             raise RuntimeError(
-                f"Piper voice not found at {PIPER_VOICE}. "
-                "Download one into backend/voices/ (see README)."
+                f"Piper voice {voice_id!r} not found at {onnx}. "
+                "Download it into backend/voices/ (see README)."
             )
-        _piper_voice = PiperVoice.load(PIPER_VOICE)
-    return _piper_voice
+        _piper_cache[voice_id] = PiperVoice.load(str(onnx))
+    return _piper_cache[voice_id]
 
 
-print(f"[startup] tts provider={TTS_PROVIDER}")
+print(f"[startup] tts provider={TTS_PROVIDER} default voice={DEFAULT_PIPER_VOICE}")
 
 # ---------------------------------------------------------------------------
 # Single conversation thread, persisted to a JSON file
@@ -159,6 +203,11 @@ class ChatRequest(BaseModel):
 
 class ChatResponse(BaseModel):
     reply: str
+
+
+class TTSRequest(BaseModel):
+    message: str
+    voice: str | None = None  # Piper voice id; ignored by the Groq TTS provider
 
 
 @app.get("/api/history")
@@ -227,29 +276,42 @@ def _tts_groq(text: str) -> bytes:
     return speech.read()
 
 
-def _tts_piper(text: str) -> bytes:
+def _tts_piper(text: str, voice_id: str) -> bytes:
     """Synthesize WAV bytes fully offline with Piper."""
     import io
     import wave
 
-    voice = _get_piper_voice()
+    voice = _get_piper_voice(voice_id)
     buf = io.BytesIO()
     with wave.open(buf, "wb") as wf:
         voice.synthesize_wav(text, wf)
     return buf.getvalue()
 
 
+@app.get("/api/voices")
+def voices():
+    """List selectable voices for the active TTS provider, plus the default."""
+    if TTS_PROVIDER == "piper":
+        avail = _available_voices()
+        default = DEFAULT_PIPER_VOICE
+    else:  # groq exposes a single fixed Orpheus voice here
+        avail = [{"id": TTS_VOICE, "label": TTS_VOICE.capitalize()}]
+        default = TTS_VOICE
+    return {"provider": TTS_PROVIDER, "default": default, "voices": avail}
+
+
 @app.post("/api/tts")
-def tts(req: ChatRequest):
+def tts(req: TTSRequest):
     """Synthesize speech for the given text, returning WAV audio."""
     text = req.message.strip()
     if not text:
         raise HTTPException(status_code=400, detail="Empty text")
     try:
         if TTS_PROVIDER == "piper":
-            audio_bytes = _tts_piper(text)
+            voice_id = req.voice or DEFAULT_PIPER_VOICE
+            audio_bytes = _tts_piper(text, voice_id)
         elif TTS_PROVIDER == "groq":
-            audio_bytes = _tts_groq(text)
+            audio_bytes = _tts_groq(text)  # voice selection is fixed for Groq
         else:
             raise RuntimeError(f"Unknown TTS_PROVIDER={TTS_PROVIDER!r}; expected 'groq' or 'piper'.")
     except HTTPException:
