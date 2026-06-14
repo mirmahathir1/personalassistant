@@ -27,7 +27,7 @@ else
 fi
 
 # --- piper: ensure the default offline voice exists (for the offline voices) ---
-# Default offline female voice + the male voice used for *asterisk* segments.
+# Default offline voice + Sofia (used for *asterisk* segments).
 VOICE_DIR="$ROOT/backend/voices"
 PIPER_BASE="https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US"
 mkdir -p "$VOICE_DIR"
@@ -39,7 +39,7 @@ download_voice() {  # $1=voice id, $2=path under en_US (e.g. amy/medium)
   fi
 }
 download_voice en_US-amy-medium amy/medium
-download_voice en_US-joe-medium joe/medium   # male, for *asterisk* segments
+download_voice en_US-libritts_r-medium libritts_r/medium   # Sofia, for *asterisk* segments
 
 # --- backend ---
 cd "$ROOT/backend"

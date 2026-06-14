@@ -23,10 +23,10 @@ cloud voice even on a `piper` launch and vice versa.
   a Piper voice appears only if both its model (`backend/voices/<id>.onnx`) and
   its sample (`backend/samples/<name>.wav`) exist; delete a sample to drop it.
 
-**Asterisk segments:** any text wrapped in `*asterisks*` (e.g. `*he whispers*`)
-is spoken in a hardcoded **offline male** Piper voice (`en_US-joe-medium`) and
-spliced — in order — into the selected voice's audio as a single clip. Override
-the male voice with the `ASTERISK_MALE_VOICE` env var.
+**Asterisk segments:** any text wrapped in `*asterisks*` (e.g. `*she whispers*`)
+is spoken in the hardcoded offline **Sofia** Piper voice (`en_US-libritts_r-medium`)
+and spliced — in order — into the selected voice's audio as a single clip.
+Override it with the `ASTERISK_VOICE` env var.
 
 ## Layout
 

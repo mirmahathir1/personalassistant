@@ -51,8 +51,9 @@ TTS_MODEL = "canopylabs/orpheus-v1-english"  # groq
 GROQ_VOICES = ["diana", "hannah", "autumn"]
 TTS_VOICE = GROQ_VOICES[0]  # default Groq voice
 
-# Hardcoded offline male voice used for *asterisk-wrapped* segments (always Piper).
-ASTERISK_MALE_VOICE = os.environ.get("ASTERISK_MALE_VOICE", "en_US-joe-medium")
+# Hardcoded offline voice used for *asterisk-wrapped* segments (always Piper).
+# "Sofia" = en_US-libritts_r-medium.
+ASTERISK_VOICE = os.environ.get("ASTERISK_VOICE", "en_US-libritts_r-medium")
 
 # Piper (offline) voices live in backend/voices/ as <id>.onnx (+ .onnx.json).
 # Selectable voices are those whose .onnx model is present on disk.
@@ -368,9 +369,9 @@ def _split_asterisk_segments(text: str) -> list[tuple[str, bool]]:
 
 
 def _synthesize(text: str, voice_id: str, asterisk: bool) -> bytes:
-    """Synthesize one segment's WAV; asterisk segments force the male Piper voice."""
+    """Synthesize one segment's WAV; asterisk segments force the Sofia Piper voice."""
     if asterisk:
-        return _tts_piper(text, ASTERISK_MALE_VOICE)
+        return _tts_piper(text, ASTERISK_VOICE)
     provider, _, name = voice_id.partition(":")
     if not name:
         provider, name = TTS_PROVIDER, voice_id
@@ -437,8 +438,8 @@ def tts(req: TTSRequest):
     Voice ids are namespaced: "groq:<orpheus_voice>" (online) or
     "piper:<model_id>" (offline). A bare/empty voice falls back to DEFAULT_VOICE.
 
-    *Asterisk-wrapped* segments are spoken in a hardcoded male Piper voice and
-    spliced back into the selected voice's audio, in order, as one clip.
+    *Asterisk-wrapped* segments are spoken in the hardcoded Sofia Piper voice
+    and spliced back into the selected voice's audio, in order, as one clip.
     """
     text = req.message.strip()
     if not text:
