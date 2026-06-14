@@ -38,10 +38,15 @@ OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434/v1")
 # STT is Groq-only (Whisper).
 STT_MODEL = "whisper-large-v3"
 
-# TTS provider: "groq" (cloud Orpheus) or "piper" (fully offline, on-CPU).
+# Default TTS provider when a request doesn't pick a specific voice:
+# "groq" (cloud Orpheus) or "piper" (fully offline, on-CPU). Either way, the
+# dropdown lets the user pick any voice from either provider per request.
 TTS_PROVIDER = os.environ.get("TTS_PROVIDER", "groq").strip().lower()
 TTS_MODEL = "canopylabs/orpheus-v1-english"  # groq
-TTS_VOICE = "diana"  # groq
+
+# Online Groq Orpheus voices to expose (female-leaning subset of the 6 available).
+GROQ_VOICES = ["diana", "hannah", "autumn"]
+TTS_VOICE = GROQ_VOICES[0]  # default Groq voice
 
 # Piper (offline) voices live in backend/voices/ as <id>.onnx (+ .onnx.json).
 # Selectable voices are those whose .onnx model is present on disk.
@@ -71,8 +76,8 @@ _VOICE_SAMPLE = {
 }
 
 
-def _available_voices() -> list[dict]:
-    """Selectable Piper voices: model present on disk AND a kept sample WAV.
+def _piper_voices() -> list[dict]:
+    """Offline Piper voices: model present on disk AND a kept sample WAV.
 
     Deleting a sample under backend/samples/ removes that voice from the menu,
     so the curated set is whatever samples you keep.
@@ -83,15 +88,40 @@ def _available_voices() -> list[dict]:
         sample = _VOICE_SAMPLE.get(vid, vid)
         if not (SAMPLES_DIR / f"{sample}.wav").exists():
             continue
-        out.append({"id": vid, "label": _VOICE_LABELS.get(vid, vid)})
+        out.append(
+            {"id": f"piper:{vid}", "label": _VOICE_LABELS.get(vid, vid), "online": False}
+        )
     return sorted(out, key=lambda v: v["label"])
 
 
-# Default selected voice: env override, else first available, else lessac.
-DEFAULT_PIPER_VOICE = os.environ.get("PIPER_VOICE", "")
-if not DEFAULT_PIPER_VOICE:
-    _avail = _available_voices()
-    DEFAULT_PIPER_VOICE = _avail[0]["id"] if _avail else "en_US-lessac-medium"
+def _groq_voices() -> list[dict]:
+    """Online Groq Orpheus voices."""
+    return [
+        {"id": f"groq:{v}", "label": v.capitalize(), "online": True} for v in GROQ_VOICES
+    ]
+
+
+def _available_voices() -> list[dict]:
+    """All selectable voices (online Groq + offline Piper), online listed first."""
+    return _groq_voices() + _piper_voices()
+
+
+# Namespaced default voice id (e.g. "groq:diana" or "piper:en_US-amy-medium"),
+# chosen by TTS_PROVIDER. PIPER_VOICE optionally overrides the offline default.
+_PIPER_DEFAULT_MODEL = os.environ.get("PIPER_VOICE", "")
+
+
+def _default_voice_id() -> str:
+    avail = _available_voices()
+    if TTS_PROVIDER == "piper":
+        if _PIPER_DEFAULT_MODEL:
+            return f"piper:{_PIPER_DEFAULT_MODEL}"
+        piper = [v for v in avail if not v["online"]]
+        return piper[0]["id"] if piper else f"groq:{TTS_VOICE}"
+    return f"groq:{TTS_VOICE}"
+
+
+DEFAULT_VOICE = _default_voice_id()
 
 SYSTEM_PROMPT = "You are a helpful, concise voice assistant. Keep replies natural and to the point."
 
@@ -142,7 +172,7 @@ def _get_piper_voice(voice_id: str):
     return _piper_cache[voice_id]
 
 
-print(f"[startup] tts provider={TTS_PROVIDER} default voice={DEFAULT_PIPER_VOICE}")
+print(f"[startup] tts default provider={TTS_PROVIDER} default voice={DEFAULT_VOICE}")
 
 # ---------------------------------------------------------------------------
 # Single conversation thread, persisted to a JSON file
@@ -266,10 +296,10 @@ async def stt(file: UploadFile = File(...)):
     return {"text": result.text}
 
 
-def _tts_groq(text: str) -> bytes:
+def _tts_groq(text: str, voice: str) -> bytes:
     speech = groq_client.audio.speech.create(
         model=TTS_MODEL,
-        voice=TTS_VOICE,
+        voice=voice,
         input=text,
         response_format="wav",
     )
@@ -290,34 +320,37 @@ def _tts_piper(text: str, voice_id: str) -> bytes:
 
 @app.get("/api/voices")
 def voices():
-    """List selectable voices for the active TTS provider, plus the default."""
-    if TTS_PROVIDER == "piper":
-        avail = _available_voices()
-        default = DEFAULT_PIPER_VOICE
-    else:  # groq exposes a single fixed Orpheus voice here
-        avail = [{"id": TTS_VOICE, "label": TTS_VOICE.capitalize()}]
-        default = TTS_VOICE
-    return {"provider": TTS_PROVIDER, "default": default, "voices": avail}
+    """List all selectable voices (online Groq + offline Piper) and the default."""
+    return {"default": DEFAULT_VOICE, "voices": _available_voices()}
 
 
 @app.post("/api/tts")
 def tts(req: TTSRequest):
-    """Synthesize speech for the given text, returning WAV audio."""
+    """Synthesize speech, routing by the voice id's provider prefix.
+
+    Voice ids are namespaced: "groq:<orpheus_voice>" (online) or
+    "piper:<model_id>" (offline). A bare/empty voice falls back to DEFAULT_VOICE.
+    """
     text = req.message.strip()
     if not text:
         raise HTTPException(status_code=400, detail="Empty text")
+
+    voice_id = (req.voice or DEFAULT_VOICE)
+    provider, _, name = voice_id.partition(":")
+    if not name:  # legacy/bare id without a prefix
+        provider, name = TTS_PROVIDER, voice_id
+
     try:
-        if TTS_PROVIDER == "piper":
-            voice_id = req.voice or DEFAULT_PIPER_VOICE
-            audio_bytes = _tts_piper(text, voice_id)
-        elif TTS_PROVIDER == "groq":
-            audio_bytes = _tts_groq(text)  # voice selection is fixed for Groq
+        if provider == "piper":
+            audio_bytes = _tts_piper(text, name)
+        elif provider == "groq":
+            audio_bytes = _tts_groq(text, name)
         else:
-            raise RuntimeError(f"Unknown TTS_PROVIDER={TTS_PROVIDER!r}; expected 'groq' or 'piper'.")
+            raise RuntimeError(f"Unknown voice provider {provider!r} in {voice_id!r}.")
     except HTTPException:
         raise
     except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"TTS failed ({TTS_PROVIDER}): {exc}") from exc
+        raise HTTPException(status_code=502, detail=f"TTS failed ({provider}): {exc}") from exc
     return Response(content=audio_bytes, media_type="audio/wav")
 
 

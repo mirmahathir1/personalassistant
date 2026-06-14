@@ -13,11 +13,15 @@ A single-thread voice chat assistant. One conversation, no thread management.
 Chat and TTS each have a swappable provider, so you can run chat **and** TTS
 fully offline (Ollama + Piper) while only STT still calls Groq.
 
-When the TTS provider is `piper`, the frontend shows a **voice dropdown** in
-the header. The menu is curated by the sample WAVs in `backend/samples/`: a
-Piper voice appears only if both its model (`backend/voices/<id>.onnx`) and its
-sample (`backend/samples/<name>.wav`) are present — delete a sample to drop
-that voice from the menu.
+The frontend header has a **voice dropdown** mixing both sources, each tagged
+`online` (Groq Orpheus, cloud) or `offline` (Piper, local). The chosen voice
+is sent per request and routed by its `provider:` prefix, so you can pick a
+cloud voice even on a `piper` launch and vice versa.
+
+- **Online voices** (Orpheus): Diana, Hannah, Autumn
+- **Offline voices** (Piper): curated by the sample WAVs in `backend/samples/` —
+  a Piper voice appears only if both its model (`backend/voices/<id>.onnx`) and
+  its sample (`backend/samples/<name>.wav`) exist; delete a sample to drop it.
 
 ## Layout
 

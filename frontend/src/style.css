@@ -50,6 +50,12 @@ body {
   gap: 8px;
 }
 
+.voice-picker {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
 .voice-select {
   background: #161922;
   border: 1px solid #2c3040;
@@ -63,6 +69,26 @@ body {
 .voice-select:focus {
   outline: none;
   border-color: #3a55a5;
+}
+
+.voice-tag {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 2px 7px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+.voice-tag.online {
+  background: rgba(47, 109, 246, 0.18);
+  color: #7c9bff;
+  border: 1px solid rgba(47, 109, 246, 0.5);
+}
+.voice-tag.offline {
+  background: rgba(120, 130, 150, 0.15);
+  color: #9aa3b5;
+  border: 1px solid #353b4a;
 }
 
 .reset-btn {

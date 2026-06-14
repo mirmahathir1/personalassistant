@@ -1,5 +1,5 @@
 <script setup>
-import { ref, onMounted, nextTick } from 'vue'
+import { ref, computed, onMounted, nextTick } from 'vue'
 
 const messages = ref([])        // { role, content }
 const input = ref('')
@@ -8,8 +8,9 @@ const status = ref('')
 const statusError = ref(false)
 const recording = ref(false)
 
-const voices = ref([])          // { id, label }
-const selectedVoice = ref('')   // current Piper voice id
+const voices = ref([])          // { id, label, online }
+const selectedVoice = ref('')   // namespaced voice id, e.g. "groq:diana"
+const currentVoice = computed(() => voices.value.find((v) => v.id === selectedVoice.value))
 
 const messagesEl = ref(null)
 let mediaRecorder = null
@@ -168,14 +169,18 @@ onMounted(() => {
         <div class="sub">Groq Llama 70B · single thread · voice in/out</div>
       </div>
       <div class="header-actions">
-        <select
-          v-if="voices.length > 1"
-          v-model="selectedVoice"
-          class="voice-select"
-          title="Voice"
-        >
-          <option v-for="v in voices" :key="v.id" :value="v.id">🎙 {{ v.label }}</option>
-        </select>
+        <div v-if="voices.length > 1" class="voice-picker">
+          <select v-model="selectedVoice" class="voice-select" title="Voice">
+            <option v-for="v in voices" :key="v.id" :value="v.id">
+              🎙 {{ v.label }} {{ v.online ? '(online)' : '(offline)' }}
+            </option>
+          </select>
+          <span
+            v-if="currentVoice"
+            class="voice-tag"
+            :class="currentVoice.online ? 'online' : 'offline'"
+          >{{ currentVoice.online ? 'online' : 'offline' }}</span>
+        </div>
         <button class="reset-btn" @click="reset">Clear</button>
       </div>
     </header>
