@@ -1,23 +1,45 @@
 #!/usr/bin/env bash
 # Start backend (FastAPI/uvicorn) and frontend (Vite) together.
 #
-# Usage: ./run.sh <groq|ollama>
-#   groq    chat via Groq llama-3.3-70b-versatile (cloud)
-#   ollama  chat via local Ollama (uncensored Llama-3.1 Lexi V2)
+# Usage: ./run.sh <groq|ollama> [groq|piper]
+#   arg 1 (chat, required): groq   = Groq llama-3.3-70b-versatile (cloud)
+#                           ollama = local Ollama (uncensored Llama-3.1 Lexi V2)
+#   arg 2 (tts, optional):  groq   = Groq Orpheus (cloud, default)
+#                           piper  = fully offline, on-CPU
 #
-# Speech (STT/TTS) always runs on Groq regardless of the chat provider.
-# Ctrl-C stops both servers.
+# STT always runs on Groq (Whisper). Ctrl-C stops both servers.
 set -e
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 
-# --- require & validate the provider argument ---
+# --- require & validate the chat provider argument ---
 PROVIDER="${1:-}"
 if [ "$PROVIDER" != "groq" ] && [ "$PROVIDER" != "ollama" ]; then
-  echo "Usage: ./run.sh <groq|ollama>" >&2
-  echo "  e.g. ./run.sh ollama" >&2
+  echo "Usage: ./run.sh <groq|ollama> [groq|piper]" >&2
+  echo "  e.g. ./run.sh ollama piper" >&2
   exit 1
 fi
 export CHAT_PROVIDER="$PROVIDER"
+
+# --- optional TTS provider argument (default groq) ---
+TTS="${2:-groq}"
+if [ "$TTS" != "groq" ] && [ "$TTS" != "piper" ]; then
+  echo "Usage: ./run.sh <groq|ollama> [groq|piper]   (TTS must be groq or piper)" >&2
+  exit 1
+fi
+export TTS_PROVIDER="$TTS"
+
+# --- piper preflight: ensure an offline voice model is present ---
+if [ "$TTS" = "piper" ]; then
+  VOICE_DIR="$ROOT/backend/voices"
+  VOICE="$VOICE_DIR/en_US-lessac-medium.onnx"
+  if [ ! -f "$VOICE" ]; then
+    echo "Downloading Piper voice (en_US-lessac-medium, ~60MB)..."
+    mkdir -p "$VOICE_DIR"
+    BASE="https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium"
+    curl -sL -o "$VOICE" "$BASE/en_US-lessac-medium.onnx"
+    curl -sL -o "$VOICE.json" "$BASE/en_US-lessac-medium.onnx.json"
+  fi
+fi
 
 # --- ollama preflight: ensure server is up and the model is present ---
 if [ "$PROVIDER" = "ollama" ]; then
@@ -51,7 +73,7 @@ npm run dev &
 FRONT_PID=$!
 
 trap "kill $BACK_PID $FRONT_PID 2>/dev/null" EXIT
-echo "Chat provider: $PROVIDER"
+echo "Chat provider: $PROVIDER | TTS provider: $TTS"
 echo "Backend  -> http://localhost:8000"
 echo "Frontend -> http://localhost:5173"
 wait

@@ -5,12 +5,13 @@ A single-thread voice chat assistant. One conversation, no thread management.
 - **Chat:** selectable — Groq `llama-3.3-70b-versatile` (cloud) **or** local
   Ollama `Llama-3.1-8B-Lexi-Uncensored-V2` (uncensored)
 - **Speech-to-text:** Groq `whisper-large-v3` (always)
-- **Text-to-speech:** Groq `canopylabs/orpheus-v1-english`, voice `diana` (always)
+- **Text-to-speech:** selectable — Groq `canopylabs/orpheus-v1-english` (cloud)
+  **or** Piper `en_US-lessac-medium` (fully offline, on-CPU)
 - **Frontend:** Vue 3 + Vite
 - **Backend:** FastAPI
 
-Speech (STT/TTS) always runs on Groq, independent of the chat backend — so
-switching to a local uncensored chat model does **not** lose voice support.
+Chat and TTS each have a swappable provider, so you can run chat **and** TTS
+fully offline (Ollama + Piper) while only STT still calls Groq.
 
 ## Layout
 
@@ -23,17 +24,21 @@ run.sh          Starts backend + frontend together
 
 ## Quick start
 
-`run.sh` requires a chat-provider argument:
+`run.sh` takes a required chat provider and an optional TTS provider:
 
 ```bash
-./run.sh groq      # chat via Groq cloud
-./run.sh ollama    # chat via local uncensored Ollama model
+./run.sh <groq|ollama> [groq|piper]
+
+./run.sh groq               # cloud chat, cloud TTS
+./run.sh ollama             # local uncensored chat, cloud TTS
+./run.sh ollama piper       # local chat + offline TTS (only STT hits Groq)
 ```
 
 Then open <http://localhost:5173>.
 
 When you pass `ollama`, the script auto-starts the Ollama server and pulls
-the Lexi Uncensored model if it isn't already present.
+the Lexi Uncensored model if needed. When you pass `piper`, it downloads the
+offline Piper voice (~60 MB) into `backend/voices/` on first run.
 
 The Groq API key (used for STT/TTS, and for chat when provider is `groq`) is
 read from the `GROQ_API_KEY` environment variable, or falls back to
@@ -46,6 +51,8 @@ read from the `GROQ_API_KEY` environment variable, or falls back to
 | `CHAT_PROVIDER`  | `groq`                         | `groq` or `ollama` (set by `run.sh` arg)  |
 | `CHAT_MODEL`     | per-provider default           | Override the chat model id                |
 | `OLLAMA_BASE_URL`| `http://localhost:11434/v1`    | Ollama OpenAI-compatible endpoint         |
+| `TTS_PROVIDER`   | `groq`                         | `groq` (cloud) or `piper` (offline)       |
+| `PIPER_VOICE`    | `backend/voices/en_US-lessac-medium.onnx` | Path to the Piper voice model  |
 | `GROQ_API_KEY`   | falls back to `api_key.txt`    | Groq key                                  |
 
 Provider defaults for `CHAT_MODEL`: `groq` → `llama-3.3-70b-versatile`,

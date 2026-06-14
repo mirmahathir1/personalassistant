@@ -35,10 +35,19 @@ CHAT_MODEL = os.environ.get("CHAT_MODEL", _DEFAULT_CHAT_MODEL.get(CHAT_PROVIDER,
 
 OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434/v1")
 
-# Speech models are Groq-only.
+# STT is Groq-only (Whisper).
 STT_MODEL = "whisper-large-v3"
-TTS_MODEL = "canopylabs/orpheus-v1-english"
-TTS_VOICE = "diana"
+
+# TTS provider: "groq" (cloud Orpheus) or "piper" (fully offline, on-CPU).
+TTS_PROVIDER = os.environ.get("TTS_PROVIDER", "groq").strip().lower()
+TTS_MODEL = "canopylabs/orpheus-v1-english"  # groq
+TTS_VOICE = "diana"  # groq
+
+# Piper (offline) voice model files; the .onnx and .onnx.json live in backend/voices/.
+PIPER_VOICE = os.environ.get(
+    "PIPER_VOICE",
+    str(Path(__file__).resolve().parent / "voices" / "en_US-lessac-medium.onnx"),
+)
 
 SYSTEM_PROMPT = "You are a helpful, concise voice assistant. Keep replies natural and to the point."
 
@@ -70,6 +79,26 @@ else:
     raise RuntimeError(f"Unknown CHAT_PROVIDER={CHAT_PROVIDER!r}; expected 'groq' or 'ollama'.")
 
 print(f"[startup] chat provider={CHAT_PROVIDER} model={CHAT_MODEL}")
+
+# Offline TTS: load the Piper voice once, lazily, the first time it's needed.
+_piper_voice = None
+
+
+def _get_piper_voice():
+    global _piper_voice
+    if _piper_voice is None:
+        from piper import PiperVoice  # imported lazily so groq-only runs don't need it
+
+        if not Path(PIPER_VOICE).exists():
+            raise RuntimeError(
+                f"Piper voice not found at {PIPER_VOICE}. "
+                "Download one into backend/voices/ (see README)."
+            )
+        _piper_voice = PiperVoice.load(PIPER_VOICE)
+    return _piper_voice
+
+
+print(f"[startup] tts provider={TTS_PROVIDER}")
 
 # ---------------------------------------------------------------------------
 # Single conversation thread, persisted to a JSON file
@@ -188,6 +217,28 @@ async def stt(file: UploadFile = File(...)):
     return {"text": result.text}
 
 
+def _tts_groq(text: str) -> bytes:
+    speech = groq_client.audio.speech.create(
+        model=TTS_MODEL,
+        voice=TTS_VOICE,
+        input=text,
+        response_format="wav",
+    )
+    return speech.read()
+
+
+def _tts_piper(text: str) -> bytes:
+    """Synthesize WAV bytes fully offline with Piper."""
+    import io
+    import wave
+
+    voice = _get_piper_voice()
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as wf:
+        voice.synthesize_wav(text, wf)
+    return buf.getvalue()
+
+
 @app.post("/api/tts")
 def tts(req: ChatRequest):
     """Synthesize speech for the given text, returning WAV audio."""
@@ -195,18 +246,24 @@ def tts(req: ChatRequest):
     if not text:
         raise HTTPException(status_code=400, detail="Empty text")
     try:
-        speech = groq_client.audio.speech.create(
-            model=TTS_MODEL,
-            voice=TTS_VOICE,
-            input=text,
-            response_format="wav",
-        )
-        audio_bytes = speech.read()
+        if TTS_PROVIDER == "piper":
+            audio_bytes = _tts_piper(text)
+        elif TTS_PROVIDER == "groq":
+            audio_bytes = _tts_groq(text)
+        else:
+            raise RuntimeError(f"Unknown TTS_PROVIDER={TTS_PROVIDER!r}; expected 'groq' or 'piper'.")
+    except HTTPException:
+        raise
     except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"Groq TTS failed: {exc}") from exc
+        raise HTTPException(status_code=502, detail=f"TTS failed ({TTS_PROVIDER}): {exc}") from exc
     return Response(content=audio_bytes, media_type="audio/wav")
 
 
 @app.get("/api/health")
 def health():
-    return {"ok": True, "provider": CHAT_PROVIDER, "model": CHAT_MODEL}
+    return {
+        "ok": True,
+        "chat_provider": CHAT_PROVIDER,
+        "model": CHAT_MODEL,
+        "tts_provider": TTS_PROVIDER,
+    }

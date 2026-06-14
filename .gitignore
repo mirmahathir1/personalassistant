@@ -33,3 +33,7 @@ yarn-error.log*
 .DS_Store
 *.swp
 *~
+
+# --- Piper offline voice models (download separately, ~60MB) ---
+backend/voices/*.onnx
+backend/voices/*.onnx.json
