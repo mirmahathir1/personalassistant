@@ -1,11 +1,9 @@
-"""Single-thread voice chat backend.
+"""Single-thread voice chat backend — fully offline.
 
-Chat and TTS providers are both chosen per request from the frontend
-(Groq cloud or local Ollama for chat; Groq Orpheus or local Piper for TTS);
-STT (Whisper) always runs on Groq. The whole app keeps exactly one
-conversation thread in memory, persisted to a JSON file across restarts.
-
-CHAT_PROVIDER / TTS_PROVIDER env vars only set the dropdowns' defaults.
+Chat runs on local Ollama, text-to-speech on local Piper, and speech-to-text on
+a local faster-whisper model. No cloud calls and no API key. The whole app keeps
+exactly one conversation thread in memory, persisted to a JSON file across
+restarts.
 """
 
 import json
@@ -17,39 +15,36 @@ from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from pydantic import BaseModel
-from groq import Groq
 from openai import OpenAI
 
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
 
-# Chat model per provider; the frontend picks the provider per request.
+# Chat runs on local Ollama only. Kept as a single-entry dict so the per-request
+# `provider` field and the frontend dropdown keep working unchanged.
 CHAT_MODELS = {
-    "groq": "llama-3.3-70b-versatile",
     # uncensored Llama-3.1 fine-tune (Lexi V2), pulled from HuggingFace via Ollama
     "ollama": "hf.co/bartowski/Llama-3.1-8B-Lexi-Uncensored-V2-GGUF:Q4_K_M",
+    # lighter uncensored Llama-3.2 3B (bartowski abliterated build), ~2GB vs ~4.9GB
+    "ollama-3b": "hf.co/bartowski/Llama-3.2-3B-Instruct-uncensored-GGUF:Q4_K_M",
 }
 # Friendly labels for the dropdown.
-CHAT_LABELS = {"groq": "Groq Llama 70B", "ollama": "Local Lexi (uncensored)"}
+CHAT_LABELS = {
+    "ollama": "Local Lexi 8B (uncensored)",
+    "ollama-3b": "Local Llama 3B (uncensored, lighter)",
+}
 
 # Default provider used when a request doesn't specify one.
-DEFAULT_CHAT_PROVIDER = os.environ.get("CHAT_PROVIDER", "groq").strip().lower()
+DEFAULT_CHAT_PROVIDER = os.environ.get("CHAT_PROVIDER", "ollama").strip().lower()
 
 OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434/v1")
 
-# STT is Groq-only (Whisper).
-STT_MODEL = "whisper-large-v3"
+# STT runs locally with faster-whisper. Model size: tiny/base/small/medium/large-v3.
+STT_MODEL = os.environ.get("STT_MODEL", "base.en")
 
-# Default TTS provider when a request doesn't pick a specific voice:
-# "groq" (cloud Orpheus) or "piper" (fully offline, on-CPU). Either way, the
-# dropdown lets the user pick any voice from either provider per request.
-TTS_PROVIDER = os.environ.get("TTS_PROVIDER", "groq").strip().lower()
-TTS_MODEL = "canopylabs/orpheus-v1-english"  # groq
-
-# Online Groq Orpheus voices to expose (female-leaning subset of the 6 available).
-GROQ_VOICES = ["diana", "hannah", "autumn"]
-TTS_VOICE = GROQ_VOICES[0]  # default Groq voice
+# TTS is local Piper only.
+TTS_PROVIDER = "piper"
 
 # Hardcoded offline voice used for *asterisk-wrapped* segments (always Piper).
 # "Sofia" = en_US-libritts_r-medium.
@@ -95,37 +90,25 @@ def _piper_voices() -> list[dict]:
         sample = _VOICE_SAMPLE.get(vid, vid)
         if not (SAMPLES_DIR / f"{sample}.wav").exists():
             continue
-        out.append(
-            {"id": f"piper:{vid}", "label": _VOICE_LABELS.get(vid, vid), "online": False}
-        )
+        out.append({"id": f"piper:{vid}", "label": _VOICE_LABELS.get(vid, vid)})
     return sorted(out, key=lambda v: v["label"])
 
 
-def _groq_voices() -> list[dict]:
-    """Online Groq Orpheus voices."""
-    return [
-        {"id": f"groq:{v}", "label": v.capitalize(), "online": True} for v in GROQ_VOICES
-    ]
-
-
 def _available_voices() -> list[dict]:
-    """All selectable voices (online Groq + offline Piper), online listed first."""
-    return _groq_voices() + _piper_voices()
+    """All selectable (offline Piper) voices."""
+    return _piper_voices()
 
 
-# Namespaced default voice id (e.g. "groq:diana" or "piper:en_US-amy-medium"),
-# chosen by TTS_PROVIDER. PIPER_VOICE optionally overrides the offline default.
+# Default offline voice id, e.g. "piper:en_US-amy-medium". PIPER_VOICE optionally
+# overrides which model is the default (filename stem).
 _PIPER_DEFAULT_MODEL = os.environ.get("PIPER_VOICE", "")
 
 
 def _default_voice_id() -> str:
+    if _PIPER_DEFAULT_MODEL:
+        return f"piper:{_PIPER_DEFAULT_MODEL}"
     avail = _available_voices()
-    if TTS_PROVIDER == "piper":
-        if _PIPER_DEFAULT_MODEL:
-            return f"piper:{_PIPER_DEFAULT_MODEL}"
-        piper = [v for v in avail if not v["online"]]
-        return piper[0]["id"] if piper else f"groq:{TTS_VOICE}"
-    return f"groq:{TTS_VOICE}"
+    return avail[0]["id"] if avail else f"piper:{ASTERISK_VOICE}"
 
 
 DEFAULT_VOICE = _default_voice_id()
@@ -133,34 +116,33 @@ DEFAULT_VOICE = _default_voice_id()
 SYSTEM_PROMPT = "You are a helpful, concise voice assistant. Keep replies natural and to the point."
 
 
-def _load_groq_key() -> str:
-    key = os.environ.get("GROQ_API_KEY")
-    if key:
-        return key.strip()
-    # Fall back to api_key.txt at the project root (one level up from backend/).
-    key_file = Path(__file__).resolve().parent.parent / "api_key.txt"
-    if key_file.exists():
-        return key_file.read_text().strip()
-    raise RuntimeError(
-        "No Groq API key found. Set GROQ_API_KEY or create api_key.txt at the project root."
-    )
-
-
-# Groq client: always used for STT/TTS.
-groq_key = _load_groq_key()
-groq_client = Groq(api_key=groq_key)
-
-# One OpenAI-compatible chat client per provider (both Groq and Ollama speak it).
-# The frontend chooses which to use per request via a dropdown.
+# OpenAI-compatible chat client(s). Ollama speaks the OpenAI protocol; the key
+# is ignored. Kept as a dict so the per-request `provider` field keeps working.
+_ollama_client = OpenAI(base_url=OLLAMA_BASE_URL, api_key="ollama")  # key ignored by Ollama
 chat_clients = {
-    "groq": OpenAI(base_url="https://api.groq.com/openai/v1", api_key=groq_key),
-    "ollama": OpenAI(base_url=OLLAMA_BASE_URL, api_key="ollama"),  # key ignored by Ollama
+    # Both providers talk to the same local Ollama; only the model id differs.
+    "ollama": _ollama_client,
+    "ollama-3b": _ollama_client,
 }
 
 if DEFAULT_CHAT_PROVIDER not in chat_clients:
-    DEFAULT_CHAT_PROVIDER = "groq"
+    DEFAULT_CHAT_PROVIDER = "ollama"
 
 print(f"[startup] chat providers={list(chat_clients)} default={DEFAULT_CHAT_PROVIDER}")
+
+# Local STT: load the faster-whisper model once, lazily, on first transcription.
+_whisper_model = None
+
+
+def _get_whisper():
+    global _whisper_model
+    if _whisper_model is None:
+        from faster_whisper import WhisperModel  # imported lazily
+
+        # int8 on CPU keeps it light; faster-whisper auto-downloads the model.
+        _whisper_model = WhisperModel(STT_MODEL, device="cpu", compute_type="int8")
+    return _whisper_model
+
 
 # Offline TTS: load each Piper voice once, lazily, and cache it by id.
 _piper_cache: dict[str, object] = {}
@@ -168,7 +150,7 @@ _piper_cache: dict[str, object] = {}
 
 def _get_piper_voice(voice_id: str):
     if voice_id not in _piper_cache:
-        from piper import PiperVoice  # imported lazily so groq-only runs don't need it
+        from piper import PiperVoice  # imported lazily
 
         onnx = VOICES_DIR / f"{voice_id}.onnx"
         if not onnx.exists():
@@ -220,6 +202,87 @@ def _save_conversation() -> None:
 
 conversation: list[dict] = _load_conversation()
 print(f"[startup] loaded {len([m for m in conversation if m['role'] != 'system'])} saved messages")
+
+# ---------------------------------------------------------------------------
+# Hybrid retrieval over the full archive
+# ---------------------------------------------------------------------------
+# The conversation list above is the complete, never-truncated archive. To keep
+# prompts inside the model's context window without ever discarding history, we
+# send the model a bounded slice per request: the system prompt, the most
+# relevant *older* turns (retrieved by BM25 + local embeddings), then the recent
+# turns verbatim. Embeddings use the Ollama client we already have.
+import retrieval
+import memory
+
+_RETRIEVAL_VECTORS = Path(
+    os.environ.get("RETRIEVAL_VECTORS_FILE", Path(__file__).resolve().parent / "chat_vectors.npy")
+)
+_FACTS_FILE = Path(
+    os.environ.get("MEMORY_FACTS_FILE", Path(__file__).resolve().parent / "facts.json")
+)
+
+# The LLM-driven memory steps (query rewrite, chunk rerank, fact extraction) use
+# the local chat provider's client+model. Override the helper provider/model with
+# MEMORY_LLM if you add more providers.
+_LLM_PROVIDER = os.environ.get("MEMORY_LLM", DEFAULT_CHAT_PROVIDER).strip().lower()
+if _LLM_PROVIDER not in chat_clients:
+    _LLM_PROVIDER = DEFAULT_CHAT_PROVIDER
+_LLM_CLIENT = chat_clients.get(_LLM_PROVIDER)
+_LLM_MODEL = CHAT_MODELS.get(_LLM_PROVIDER, "")
+
+conv_index = None
+fact_store = None
+if retrieval.ENABLED:
+    _embed_client = chat_clients.get("ollama")  # embeddings always via local Ollama
+    conv_index = retrieval.ConversationIndex(
+        _RETRIEVAL_VECTORS,
+        embed_client=_embed_client,
+        rerank_client=_LLM_CLIENT,
+        rerank_model=_LLM_MODEL,
+    )
+    conv_index.rebuild(conversation)
+    fact_store = memory.FactStore(_FACTS_FILE, client=_LLM_CLIENT, model=_LLM_MODEL)
+    print(
+        f"[startup] retrieval enabled: window={retrieval.WINDOW}/{retrieval.STRIDE} "
+        f"recent_n={retrieval.RECENT_N} top_k={retrieval.TOP_K} "
+        f"embed_model={retrieval.EMBED_MODEL} rerank={retrieval.RERANK_ENABLED} "
+        f"llm={_LLM_PROVIDER} facts={len(fact_store.facts)}"
+    )
+else:
+    print("[startup] retrieval disabled (RETRIEVAL_ENABLED=0)")
+
+
+def _build_chat_messages(message: str) -> list[dict]:
+    """Assemble the bounded message list to send for this turn.
+
+    system prompt + [long-term facts] + [reranked retrieved context]
+    + last N turns verbatim. Falls back to the whole thread if retrieval is off.
+    """
+    system = [m for m in conversation if m.get("role") == "system"][:1]
+    body = [m for m in conversation if m.get("role") != "system"]
+
+    if conv_index is None:
+        return system + body  # retrieval disabled: legacy behavior
+
+    recent = body[-retrieval.RECENT_N:] if retrieval.RECENT_N else body
+
+    # B. Rewrite the (conversational) message into a standalone retrieval query.
+    query = memory.rewrite_query(_LLM_CLIENT, _LLM_MODEL, recent, message)
+    # A + C. Hybrid candidates over windowed chunks, LLM-reranked to the best few.
+    chunks = conv_index.retrieve(query, retrieval.RECENT_N, retrieval.TOP_K)
+    # Drop any chunk that overlaps the recent tail we're already sending verbatim.
+    recent_ids = {id(m) for m in recent}
+    chunks = [c for c in chunks if not any(id(t) in recent_ids for t in c)]
+
+    messages = list(system)
+    if fact_store is not None:  # D. always-on long-term facts
+        block = fact_store.render_block()
+        if block:
+            messages.append({"role": "system", "content": block})
+    if chunks:
+        messages.append({"role": "system", "content": retrieval.render_context_block(chunks)})
+    messages.extend(recent)
+    return messages
 
 # ---------------------------------------------------------------------------
 # UI settings (dropdown selections), persisted to a JSON file
@@ -274,7 +337,7 @@ app.add_middleware(
 
 class ChatRequest(BaseModel):
     message: str
-    provider: str | None = None  # "groq" or "ollama"; defaults to DEFAULT_CHAT_PROVIDER
+    provider: str | None = None  # "ollama"; defaults to DEFAULT_CHAT_PROVIDER
 
 
 class ChatResponse(BaseModel):
@@ -283,12 +346,18 @@ class ChatResponse(BaseModel):
 
 class TTSRequest(BaseModel):
     message: str
-    voice: str | None = None  # Piper voice id; ignored by the Groq TTS provider
+    voice: str | None = None  # Piper voice id; falls back to DEFAULT_VOICE
 
 
 class SettingsRequest(BaseModel):
     chatProvider: str | None = None
     voice: str | None = None
+
+
+class DeleteRequest(BaseModel):
+    # Indices into the visible conversation (the list /api/history returns,
+    # i.e. excluding the system prompt), of the messages to forget.
+    indices: list[int]
 
 
 @app.get("/api/settings")
@@ -318,7 +387,45 @@ def reset():
     global conversation
     conversation = _fresh_conversation()
     _save_conversation()
+    if conv_index is not None:
+        conv_index.rebuild(conversation)
+    if fact_store is not None:
+        fact_store.clear()
     return {"ok": True}
+
+
+@app.post("/api/delete")
+def delete_messages(req: DeleteRequest):
+    """Forget specific messages: remove them, then prune derived memory.
+
+    `indices` are positions in the visible (system-excluded) conversation. We
+    delete those turns, rebuild + prune the retrieval index/vector cache, and ask
+    the fact store to drop any long-term facts derived from the deleted text.
+    """
+    global conversation
+    # Map visible indices -> positions in the full thread (which has the system prompt).
+    visible_positions = [i for i, m in enumerate(conversation) if m.get("role") != "system"]
+    to_remove = set()
+    deleted_texts: list[str] = []
+    for vi in req.indices:
+        if 0 <= vi < len(visible_positions):
+            pos = visible_positions[vi]
+            to_remove.add(pos)
+            deleted_texts.append(conversation[pos].get("content") or "")
+    if not to_remove:
+        raise HTTPException(status_code=400, detail="No valid message indices to delete")
+
+    conversation = [m for i, m in enumerate(conversation) if i not in to_remove]
+    _save_conversation()
+    if conv_index is not None:
+        conv_index.rebuild(conversation)  # rebuild + prune orphaned vectors
+    removed_facts = fact_store.prune_facts(deleted_texts) if fact_store is not None else []
+    return {
+        "ok": True,
+        "deleted": len(to_remove),
+        "removed_facts": removed_facts,
+        "messages": [m for m in conversation if m["role"] != "system"],
+    }
 
 
 @app.get("/api/providers")
@@ -345,10 +452,14 @@ def chat(req: ChatRequest):
         raise HTTPException(status_code=400, detail=f"Unknown chat provider {provider!r}")
 
     conversation.append({"role": "user", "content": text})
+    # Build the bounded slice (system + retrieved older context + recent turns).
+    # The new user turn is now in the thread, so it's part of the recent tail;
+    # retrieval uses `text` as the query and looks only at older turns.
+    messages = _build_chat_messages(text)
     try:
         completion = client.chat.completions.create(
             model=CHAT_MODELS[provider],
-            messages=conversation,
+            messages=messages,
             temperature=0.7,
         )
     except Exception as exc:  # surface backend errors to the client
@@ -360,33 +471,41 @@ def chat(req: ChatRequest):
     reply = completion.choices[0].message.content
     conversation.append({"role": "assistant", "content": reply})
     _save_conversation()
+    # Re-window the archive so the new turns are retrievable next time (cheap,
+    # incremental: only new chunks are embedded), then update long-term facts.
+    if conv_index is not None:
+        conv_index.rebuild(conversation)
+    if fact_store is not None:
+        fact_store.update(text, reply)
     return ChatResponse(reply=reply)
 
 
 @app.post("/api/stt")
 async def stt(file: UploadFile = File(...)):
-    """Transcribe uploaded audio with Whisper."""
+    """Transcribe uploaded audio locally with faster-whisper."""
+    import tempfile
+
     audio_bytes = await file.read()
     if not audio_bytes:
         raise HTTPException(status_code=400, detail="Empty audio upload")
+    suffix = Path(file.filename or "audio.webm").suffix or ".webm"
+    tmp = None
     try:
-        result = groq_client.audio.transcriptions.create(
-            file=(file.filename or "audio.webm", audio_bytes),
-            model=STT_MODEL,
-        )
+        # faster-whisper decodes via ffmpeg, so write the upload to a temp file.
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as fh:
+            fh.write(audio_bytes)
+            tmp = fh.name
+        segments, _ = _get_whisper().transcribe(tmp)
+        text = "".join(seg.text for seg in segments).strip()
     except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"Groq STT failed: {exc}") from exc
-    return {"text": result.text}
-
-
-def _tts_groq(text: str, voice: str) -> bytes:
-    speech = groq_client.audio.speech.create(
-        model=TTS_MODEL,
-        voice=voice,
-        input=text,
-        response_format="wav",
-    )
-    return speech.read()
+        raise HTTPException(status_code=502, detail=f"Local STT failed: {exc}") from exc
+    finally:
+        if tmp:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+    return {"text": text}
 
 
 def _tts_piper(text: str, voice_id: str) -> bytes:
@@ -431,11 +550,9 @@ def _synthesize(text: str, voice_id: str, asterisk: bool) -> bytes:
         return _tts_piper(text, ASTERISK_VOICE)
     provider, _, name = voice_id.partition(":")
     if not name:
-        provider, name = TTS_PROVIDER, voice_id
+        provider, name = "piper", voice_id
     if provider == "piper":
         return _tts_piper(text, name)
-    if provider == "groq":
-        return _tts_groq(text, name)
     raise RuntimeError(f"Unknown voice provider {provider!r} in {voice_id!r}.")
 
 
@@ -451,8 +568,8 @@ def _wav_params(wav_bytes: bytes):
 def _concat_wavs(wav_blobs: list[bytes]) -> bytes:
     """Concatenate WAVs into one, resampling/normalizing to a common format.
 
-    Segments can come from different engines (Groq 24kHz vs Piper 22.05kHz), so
-    each is converted to the first segment's channels/width/rate via audioop.
+    Different Piper voices can have different sample rates (e.g. 22.05kHz vs
+    24kHz), so each is converted to the first segment's channels/width/rate.
     """
     import audioop
     import io
@@ -484,16 +601,16 @@ def _concat_wavs(wav_blobs: list[bytes]) -> bytes:
 
 @app.get("/api/voices")
 def voices():
-    """List all selectable voices (online Groq + offline Piper) and the default."""
+    """List all selectable (offline Piper) voices and the default."""
     return {"default": DEFAULT_VOICE, "voices": _available_voices()}
 
 
 @app.post("/api/tts")
 def tts(req: TTSRequest):
-    """Synthesize speech, routing by the voice id's provider prefix.
+    """Synthesize speech with Piper, routing by the voice id's provider prefix.
 
-    Voice ids are namespaced: "groq:<orpheus_voice>" (online) or
-    "piper:<model_id>" (offline). A bare/empty voice falls back to DEFAULT_VOICE.
+    Voice ids are namespaced "piper:<model_id>". A bare/empty voice falls back
+    to DEFAULT_VOICE.
 
     *Asterisk-wrapped* segments are spoken in the hardcoded Sofia Piper voice
     and spliced back into the selected voice's audio, in order, as one clip.
@@ -521,5 +638,6 @@ def health():
         "ok": True,
         "chat_default": DEFAULT_CHAT_PROVIDER,
         "chat_providers": list(chat_clients),
-        "tts_default_provider": TTS_PROVIDER,
+        "tts_provider": TTS_PROVIDER,
+        "stt_model": STT_MODEL,
     }

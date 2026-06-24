@@ -6,6 +6,12 @@ api_key.txt
 # --- Persisted runtime data ---
 backend/chat_history.json
 backend/chat_history.json.tmp
+# Retrieval embedding cache (rebuilt from chat_history.json on demand).
+backend/chat_vectors.npy
+backend/chat_vectors.keys.json
+# Long-term extracted-fact memory store.
+backend/facts.json
+backend/facts.json.tmp
 backend/settings.json
 backend/settings.json.tmp
 
