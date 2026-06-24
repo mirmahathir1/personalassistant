@@ -2,8 +2,9 @@
 
 Chat runs on local Ollama, text-to-speech on local Kokoro (neural ONNX), and
 speech-to-text on a local faster-whisper model. No cloud calls and no API key.
-The whole app keeps exactly one conversation thread in memory, persisted to a
-JSON file across restarts.
+The app holds many **characters**, each its own conversation thread with its own
+voice + intelligence (chat model) and its own history/retrieval/facts, persisted
+as namespaced JSON under data/<char_id>/ across restarts.
 """
 
 import json
@@ -100,9 +101,19 @@ _VOICE_LABELS = {
 ASTERISK_VOICE = os.environ.get("ASTERISK_VOICE", "af_nicole")
 
 
-def _available_voices() -> list[dict]:
-    """All selectable (offline Kokoro) voices, in label order."""
-    out = [{"id": f"kokoro:{vid}", "label": label} for vid, label in _VOICE_LABELS.items()]
+def _available_voices(gender: str | None = None) -> list[dict]:
+    """Selectable (offline Kokoro) voices, in label order.
+
+    If `gender` ("female"/"male") is given, only voices of that gender are
+    returned (af_/bf_ = female, am_/bm_ = male), so the creation flow can offer
+    voices matching the chosen gender.
+    """
+    out = []
+    for vid, label in _VOICE_LABELS.items():
+        vg = "female" if len(vid) >= 2 and vid[1] == "f" else "male" if len(vid) >= 2 and vid[1] == "m" else None
+        if gender and vg != gender:
+            continue
+        out.append({"id": f"kokoro:{vid}", "label": label, "gender": vg})
     return sorted(out, key=lambda v: v["label"])
 
 
@@ -118,6 +129,26 @@ def _default_voice_id() -> str:
 DEFAULT_VOICE = _default_voice_id()
 
 SYSTEM_PROMPT = "You are a helpful, concise voice assistant. Keep replies natural and to the point."
+
+
+def _system_prompt_for(char: dict | None) -> str:
+    """Build a character's system prompt: identity + its persona core.
+
+    The generic SYSTEM_PROMPT is the fallback (e.g. retrieval-disabled threads or
+    characters created before bios existed). The persona core is short and always
+    present; the long bio is surfaced separately via retrieval (see BioIndex).
+    """
+    if not char:
+        return SYSTEM_PROMPT
+    name = char.get("name") or "the assistant"
+    gender = char.get("gender") or ""
+    core = (char.get("persona_core") or "").strip()
+    base = (
+        f"You are {name}, a {gender} character. Stay in character at all times; "
+        "never say you are an AI or break character. Keep replies natural and "
+        "conversational."
+    )
+    return f"{base}\n\n{core}" if core else base
 
 
 # OpenAI-compatible chat client(s). Ollama speaks the OpenAI protocol; the key
@@ -175,61 +206,16 @@ def _get_kokoro():
 print(f"[startup] tts default provider={TTS_PROVIDER} default voice={DEFAULT_VOICE}")
 
 # ---------------------------------------------------------------------------
-# Single conversation thread, persisted to a JSON file
+# Per-character chat threads (each its own history + retrieval index + facts)
 # ---------------------------------------------------------------------------
-
-# Stored next to this file (override with CHAT_HISTORY_FILE).
-HISTORY_FILE = Path(
-    os.environ.get("CHAT_HISTORY_FILE", Path(__file__).resolve().parent / "chat_history.json")
-)
-
-
-def _fresh_conversation() -> list[dict]:
-    return [{"role": "system", "content": SYSTEM_PROMPT}]
-
-
-def _load_conversation() -> list[dict]:
-    """Load the saved thread, or start fresh if there's nothing valid on disk."""
-    if HISTORY_FILE.exists():
-        try:
-            data = json.loads(HISTORY_FILE.read_text())
-            if isinstance(data, list) and data:
-                # Keep whatever was saved; ensure a system prompt leads the thread.
-                if data[0].get("role") != "system":
-                    data.insert(0, {"role": "system", "content": SYSTEM_PROMPT})
-                return data
-        except (json.JSONDecodeError, OSError, AttributeError) as exc:
-            print(f"[startup] could not read {HISTORY_FILE}: {exc}; starting fresh")
-    return _fresh_conversation()
-
-
-def _save_conversation() -> None:
-    """Persist the thread atomically so a crash mid-write can't corrupt it."""
-    tmp = HISTORY_FILE.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(conversation, ensure_ascii=False, indent=2))
-    tmp.replace(HISTORY_FILE)
-
-
-conversation: list[dict] = _load_conversation()
-print(f"[startup] loaded {len([m for m in conversation if m['role'] != 'system'])} saved messages")
-
-# ---------------------------------------------------------------------------
-# Hybrid retrieval over the full archive
-# ---------------------------------------------------------------------------
-# The conversation list above is the complete, never-truncated archive. To keep
-# prompts inside the model's context window without ever discarding history, we
-# send the model a bounded slice per request: the system prompt, the most
-# relevant *older* turns (retrieved by BM25 + local embeddings), then the recent
-# turns verbatim. Embeddings use the Ollama client we already have.
+# The app holds many characters; each is one never-truncated conversation thread
+# with its own JSON files under data/<char_id>/. To keep prompts inside the
+# model's context window without discarding history, we send a bounded slice per
+# request: system prompt, relevant older turns (BM25 + local embeddings), then
+# recent turns verbatim. Threads are loaded lazily and cached per character.
 import retrieval
 import memory
-
-_RETRIEVAL_VECTORS = Path(
-    os.environ.get("RETRIEVAL_VECTORS_FILE", Path(__file__).resolve().parent / "chat_vectors.npy")
-)
-_FACTS_FILE = Path(
-    os.environ.get("MEMORY_FACTS_FILE", Path(__file__).resolve().parent / "facts.json")
-)
+import characters as characters_mod
 
 # The LLM-driven memory steps (query rewrite, chunk rerank, fact extraction) use
 # the local chat provider's client+model. Override the helper provider/model with
@@ -240,59 +226,128 @@ if _LLM_PROVIDER not in chat_clients:
 _LLM_CLIENT = chat_clients.get(_LLM_PROVIDER)
 _LLM_MODEL = CHAT_MODELS.get(_LLM_PROVIDER, "")
 
-conv_index = None
-fact_store = None
-if retrieval.ENABLED:
-    _embed_client = chat_clients.get("ollama")  # embeddings always via local Ollama
-    conv_index = retrieval.ConversationIndex(
-        _RETRIEVAL_VECTORS,
-        embed_client=_embed_client,
-        rerank_client=_LLM_CLIENT,
-        rerank_model=_LLM_MODEL,
-    )
-    conv_index.rebuild(conversation)
-    fact_store = memory.FactStore(_FACTS_FILE, client=_LLM_CLIENT, model=_LLM_MODEL)
-    print(
-        f"[startup] retrieval enabled: window={retrieval.WINDOW}/{retrieval.STRIDE} "
-        f"recent_n={retrieval.RECENT_N} top_k={retrieval.TOP_K} "
-        f"embed_model={retrieval.EMBED_MODEL} rerank={retrieval.RERANK_ENABLED} "
-        f"llm={_LLM_PROVIDER} facts={len(fact_store.facts)}"
-    )
-else:
-    print("[startup] retrieval disabled (RETRIEVAL_ENABLED=0)")
+char_store = characters_mod.CharacterStore()
 
 
-def _build_chat_messages(message: str) -> list[dict]:
-    """Assemble the bounded message list to send for this turn.
+def _fresh_conversation() -> list[dict]:
+    return [{"role": "system", "content": SYSTEM_PROMPT}]
 
-    system prompt + [long-term facts] + [reranked retrieved context]
-    + last N turns verbatim. Falls back to the whole thread if retrieval is off.
+
+class CharacterThread:
+    """One character's loaded thread: conversation list + retrieval index + facts.
+
+    Wraps the same retrieval/memory machinery the app used to keep as global
+    singletons, but pointed at the character's namespaced files. Loaded lazily
+    and cached in `_threads`.
     """
-    system = [m for m in conversation if m.get("role") == "system"][:1]
-    body = [m for m in conversation if m.get("role") != "system"]
 
-    if conv_index is None:
-        return system + body  # retrieval disabled: legacy behavior
+    def __init__(self, char_id: str):
+        self.id = char_id
+        self.char = char_store.get(char_id)  # may be None (e.g. mid-delete); falls back to generic prompt
+        self.system_prompt = _system_prompt_for(self.char)
+        p = characters_mod.char_paths(char_id)
+        p["dir"].mkdir(parents=True, exist_ok=True)
+        self.history_file = p["history"]
+        self.conversation = self._load_conversation()
+        self.conv_index = None
+        self.bio_index = None
+        self.fact_store = None
+        if retrieval.ENABLED:
+            self.conv_index = retrieval.ConversationIndex(
+                p["vectors"],
+                embed_client=chat_clients.get("ollama"),  # embeddings via local Ollama
+                rerank_client=_LLM_CLIENT,
+                rerank_model=_LLM_MODEL,
+            )
+            self.conv_index.rebuild(self.conversation)
+            bio = (self.char or {}).get("bio", "")
+            if bio.strip():
+                self.bio_index = retrieval.BioIndex(
+                    p["bio_vectors"],
+                    bio,
+                    embed_client=chat_clients.get("ollama"),
+                    rerank_client=_LLM_CLIENT,
+                    rerank_model=_LLM_MODEL,
+                )
+            self.fact_store = memory.FactStore(p["facts"], client=_LLM_CLIENT, model=_LLM_MODEL)
 
-    recent = body[-retrieval.RECENT_N:] if retrieval.RECENT_N else body
+    def _load_conversation(self) -> list[dict]:
+        """Load history; always keep a single system turn that reflects the
+        character's *current* persona (rebuilt from the record, not whatever was
+        frozen on disk), so editing the persona later takes effect."""
+        if self.history_file.exists():
+            try:
+                data = json.loads(self.history_file.read_text())
+                if isinstance(data, list) and data:
+                    body = [m for m in data if m.get("role") != "system"]
+                    return [{"role": "system", "content": self.system_prompt}] + body
+            except (json.JSONDecodeError, OSError, AttributeError) as exc:
+                print(f"[chars] could not read {self.history_file}: {exc}; starting fresh")
+        return [{"role": "system", "content": self.system_prompt}]
 
-    # B. Rewrite the (conversational) message into a standalone retrieval query.
-    query = memory.rewrite_query(_LLM_CLIENT, _LLM_MODEL, recent, message)
-    # A + C. Hybrid candidates over windowed chunks, LLM-reranked to the best few.
-    chunks = conv_index.retrieve(query, retrieval.RECENT_N, retrieval.TOP_K)
-    # Drop any chunk that overlaps the recent tail we're already sending verbatim.
-    recent_ids = {id(m) for m in recent}
-    chunks = [c for c in chunks if not any(id(t) in recent_ids for t in c)]
+    def save(self) -> None:
+        """Persist the thread atomically so a crash mid-write can't corrupt it."""
+        tmp = self.history_file.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(self.conversation, ensure_ascii=False, indent=2))
+        tmp.replace(self.history_file)
 
-    messages = list(system)
-    if fact_store is not None:  # D. always-on long-term facts
-        block = fact_store.render_block()
-        if block:
-            messages.append({"role": "system", "content": block})
-    if chunks:
-        messages.append({"role": "system", "content": retrieval.render_context_block(chunks)})
-    messages.extend(recent)
-    return messages
+    def build_chat_messages(self, message: str) -> list[dict]:
+        """Assemble the bounded message list to send for this turn.
+
+        system prompt + [long-term facts] + [reranked retrieved context]
+        + last N turns verbatim. Falls back to the whole thread if retrieval is off.
+        """
+        system = [m for m in self.conversation if m.get("role") == "system"][:1]
+        body = [m for m in self.conversation if m.get("role") != "system"]
+
+        if self.conv_index is None:
+            return system + body  # retrieval disabled: legacy behavior
+
+        recent = body[-retrieval.RECENT_N:] if retrieval.RECENT_N else body
+
+        # Rewrite the message into a standalone retrieval query, gather hybrid
+        # candidates over windowed chunks, LLM-rerank to the best few.
+        query = memory.rewrite_query(_LLM_CLIENT, _LLM_MODEL, recent, message)
+        chunks = self.conv_index.retrieve(query, retrieval.RECENT_N, retrieval.TOP_K)
+        # Drop any chunk overlapping the recent tail we already send verbatim.
+        recent_ids = {id(m) for m in recent}
+        chunks = [c for c in chunks if not any(id(t) in recent_ids for t in c)]
+
+        messages = list(system)
+        if self.bio_index is not None:  # relevant slice of the character's own bio
+            bio_chunks = self.bio_index.retrieve(query, retrieval.TOP_K)
+            if bio_chunks:
+                messages.append(
+                    {"role": "system", "content": retrieval.render_bio_block(bio_chunks)}
+                )
+        if self.fact_store is not None:  # always-on long-term facts
+            block = self.fact_store.render_block()
+            if block:
+                messages.append({"role": "system", "content": block})
+        if chunks:
+            messages.append({"role": "system", "content": retrieval.render_context_block(chunks)})
+        messages.extend(recent)
+        return messages
+
+
+# Lazily-loaded, cached CharacterThread per character id.
+_threads: dict[str, CharacterThread] = {}
+
+
+def _get_thread(char_id: str) -> CharacterThread:
+    if char_id not in _threads:
+        _threads[char_id] = CharacterThread(char_id)
+    return _threads[char_id]
+
+
+def _require_character(char_id: str | None) -> dict:
+    """Resolve a character id to its record, or raise 400/404."""
+    if not char_id:
+        raise HTTPException(status_code=400, detail="character id is required")
+    char = char_store.get(char_id)
+    if char is None:
+        raise HTTPException(status_code=404, detail=f"Unknown character {char_id!r}")
+    return char
 
 # ---------------------------------------------------------------------------
 # UI settings (dropdown selections), persisted to a JSON file
@@ -339,6 +394,59 @@ def _save_settings() -> None:
 settings: dict = _load_settings()
 print(f"[startup] settings {settings}")
 
+
+# --- Non-destructive migration of the legacy single thread into "Emily" -------
+# If there's no character index yet but a legacy chat_history.json exists, fold
+# that thread into a new character "Emily" (Female, high intelligence, current
+# voice). The legacy files are COPIED, never moved/deleted — they stay on disk.
+def _migrate_legacy_thread() -> None:
+    import shutil
+
+    if char_store.exists():
+        return  # already migrated, or a fresh install that already has an index
+    legacy_history = Path(
+        os.environ.get("CHAT_HISTORY_FILE", Path(__file__).resolve().parent / "chat_history.json")
+    )
+    if not legacy_history.exists():
+        char_store._save()  # write an empty index so we don't re-scan every boot
+        return
+
+    voice = settings.get("voice", DEFAULT_VOICE)
+    if characters_mod.voice_gender(voice) != "female":
+        voice = f"kokoro:{ASTERISK_VOICE}"  # ensure Emily gets a female voice
+    char = char_store.create(
+        name="Emily",
+        gender="female",
+        voice=voice,
+        intelligence="high",
+        created_at="1970-01-01T00:00:00Z",  # sorts oldest; no clock access at import
+    )
+    dst = characters_mod.char_paths(char["id"])
+    legacy_facts = Path(
+        os.environ.get("MEMORY_FACTS_FILE", Path(__file__).resolve().parent / "facts.json")
+    )
+    legacy_vectors = Path(
+        os.environ.get(
+            "RETRIEVAL_VECTORS_FILE", Path(__file__).resolve().parent / "chat_vectors.npy"
+        )
+    )
+    for src, dest in [
+        (legacy_history, dst["history"]),
+        (legacy_facts, dst["facts"]),
+        (legacy_vectors, dst["vectors"]),
+        (legacy_vectors.with_suffix(".keys.json"), dst["vectors"].with_suffix(".keys.json")),
+    ]:
+        if src.exists():
+            shutil.copy2(src, dest)  # copy — never move or delete the originals
+    print(
+        f"[startup] migrated legacy thread into character 'Emily' ({char['id']}); "
+        "legacy files kept on disk"
+    )
+
+
+_migrate_legacy_thread()
+print(f"[startup] {len(char_store.characters)} character(s) available")
+
 # ---------------------------------------------------------------------------
 # App
 # ---------------------------------------------------------------------------
@@ -355,7 +463,7 @@ app.add_middleware(
 
 class ChatRequest(BaseModel):
     message: str
-    provider: str | None = None  # "ollama"; defaults to DEFAULT_CHAT_PROVIDER
+    character: str  # character id; its intelligence picks the chat model
 
 
 class ChatResponse(BaseModel):
@@ -364,7 +472,8 @@ class ChatResponse(BaseModel):
 
 class TTSRequest(BaseModel):
     message: str
-    voice: str | None = None  # Kokoro voice id; falls back to DEFAULT_VOICE
+    voice: str | None = None  # Kokoro voice id; falls back to the character's / default
+    character: str | None = None  # if given, use that character's voice
 
 
 class SettingsRequest(BaseModel):
@@ -372,7 +481,17 @@ class SettingsRequest(BaseModel):
     voice: str | None = None
 
 
+class CharacterCreateRequest(BaseModel):
+    name: str
+    gender: str          # "female" | "male"
+    voice: str           # Kokoro voice id; must match gender
+    intelligence: str    # "low" | "medium" | "high"
+    persona_core: str = ""  # short identity blurb, injected into the system prompt
+    bio: str = ""           # long-form lore, indexed for retrieval (surfaced on demand)
+
+
 class DeleteRequest(BaseModel):
+    character: str  # which character's thread to forget messages from
     # Indices into the visible conversation (the list /api/history returns,
     # i.e. excluding the system prompt), of the messages to forget.
     indices: list[int]
@@ -394,56 +513,117 @@ def update_settings(req: SettingsRequest):
         return dict(settings)
 
 
+# ---------------------------------------------------------------------------
+# Characters: create / list / delete. Each is one chat thread; its settings
+# (name, gender, voice, intelligence) are fixed at creation time.
+# ---------------------------------------------------------------------------
+
+
+def _public_character(char: dict) -> dict:
+    """Character record + its derived chat provider, for the frontend."""
+    return {
+        **{k: char.get(k) for k in (
+            "id", "name", "gender", "voice", "intelligence",
+            "persona_core", "bio", "created_at",
+        )},
+        "provider": characters_mod.INTELLIGENCE_PROVIDER.get(char.get("intelligence", ""), ""),
+    }
+
+
+@app.get("/api/characters")
+def list_characters():
+    """List all characters (newest first)."""
+    return {"characters": [_public_character(c) for c in char_store.list()]}
+
+
+@app.post("/api/characters")
+def create_character(req: CharacterCreateRequest):
+    """Create a character (and its empty thread). Settings are immutable after."""
+    from datetime import datetime, timezone
+
+    try:
+        char = char_store.create(
+            name=req.name,
+            gender=req.gender,
+            voice=req.voice,
+            intelligence=req.intelligence,
+            persona_core=req.persona_core,
+            bio=req.bio,
+            created_at=datetime.now(timezone.utc).isoformat(),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _get_thread(char["id"])  # materialize the (empty) thread + index now
+    return _public_character(char)
+
+
+@app.delete("/api/characters/{char_id}")
+def delete_character(char_id: str):
+    """Delete a character and all of its thread data."""
+    if not char_store.get(char_id):
+        raise HTTPException(status_code=404, detail=f"Unknown character {char_id!r}")
+    char_store.delete(char_id)
+    _threads.pop(char_id, None)
+    return {"ok": True, "deleted": char_id}
+
+
 @app.get("/api/history")
-def history():
-    """Return the visible conversation (everything except the system prompt)."""
-    return {"messages": [m for m in conversation if m["role"] != "system"]}
+def history(character: str):
+    """Return one character's visible conversation (excluding the system prompt)."""
+    _require_character(character)
+    thread = _get_thread(character)
+    return {"messages": [m for m in thread.conversation if m["role"] != "system"]}
 
 
 @app.post("/api/reset")
-def reset():
-    """Clear the single thread back to just the system prompt."""
-    global conversation
-    conversation = _fresh_conversation()
-    _save_conversation()
-    if conv_index is not None:
-        conv_index.rebuild(conversation)
-    if fact_store is not None:
-        fact_store.clear()
+def reset(character: str):
+    """Clear one character's thread back to just the system prompt."""
+    _require_character(character)
+    thread = _get_thread(character)
+    thread.conversation = [{"role": "system", "content": thread.system_prompt}]
+    thread.save()
+    if thread.conv_index is not None:
+        thread.conv_index.rebuild(thread.conversation)
+    if thread.fact_store is not None:
+        thread.fact_store.clear()
     return {"ok": True}
 
 
 @app.post("/api/delete")
 def delete_messages(req: DeleteRequest):
-    """Forget specific messages: remove them, then prune derived memory.
+    """Forget specific messages from a character's thread, then prune derived memory.
 
     `indices` are positions in the visible (system-excluded) conversation. We
     delete those turns, rebuild + prune the retrieval index/vector cache, and ask
     the fact store to drop any long-term facts derived from the deleted text.
     """
-    global conversation
+    _require_character(req.character)
+    thread = _get_thread(req.character)
+    convo = thread.conversation
     # Map visible indices -> positions in the full thread (which has the system prompt).
-    visible_positions = [i for i, m in enumerate(conversation) if m.get("role") != "system"]
+    visible_positions = [i for i, m in enumerate(convo) if m.get("role") != "system"]
     to_remove = set()
     deleted_texts: list[str] = []
     for vi in req.indices:
         if 0 <= vi < len(visible_positions):
             pos = visible_positions[vi]
             to_remove.add(pos)
-            deleted_texts.append(conversation[pos].get("content") or "")
+            deleted_texts.append(convo[pos].get("content") or "")
     if not to_remove:
         raise HTTPException(status_code=400, detail="No valid message indices to delete")
 
-    conversation = [m for i, m in enumerate(conversation) if i not in to_remove]
-    _save_conversation()
-    if conv_index is not None:
-        conv_index.rebuild(conversation)  # rebuild + prune orphaned vectors
-    removed_facts = fact_store.prune_facts(deleted_texts) if fact_store is not None else []
+    thread.conversation = [m for i, m in enumerate(convo) if i not in to_remove]
+    thread.save()
+    if thread.conv_index is not None:
+        thread.conv_index.rebuild(thread.conversation)  # rebuild + prune orphaned vectors
+    removed_facts = (
+        thread.fact_store.prune_facts(deleted_texts) if thread.fact_store is not None else []
+    )
     return {
         "ok": True,
         "deleted": len(to_remove),
         "removed_facts": removed_facts,
-        "messages": [m for m in conversation if m["role"] != "system"],
+        "messages": [m for m in thread.conversation if m["role"] != "system"],
     }
 
 
@@ -568,16 +748,22 @@ def chat(req: ChatRequest):
     if not text:
         raise HTTPException(status_code=400, detail="Empty message")
 
-    provider = (req.provider or DEFAULT_CHAT_PROVIDER).strip().lower()
+    char = _require_character(req.character)
+    # Intelligence picks the chat model; the character can't change it after creation.
+    provider = characters_mod.INTELLIGENCE_PROVIDER.get(char.get("intelligence", ""), "")
     client = chat_clients.get(provider)
     if client is None:
-        raise HTTPException(status_code=400, detail=f"Unknown chat provider {provider!r}")
+        raise HTTPException(
+            status_code=400, detail=f"Character has invalid intelligence {char.get('intelligence')!r}"
+        )
 
-    conversation.append({"role": "user", "content": text})
+    thread = _get_thread(char["id"])
+    convo = thread.conversation
+    convo.append({"role": "user", "content": text})
     # Build the bounded slice (system + retrieved older context + recent turns).
     # The new user turn is now in the thread, so it's part of the recent tail;
     # retrieval uses `text` as the query and looks only at older turns.
-    messages = _build_chat_messages(text)
+    messages = thread.build_chat_messages(text)
     try:
         completion = client.chat.completions.create(
             model=CHAT_MODELS[provider],
@@ -585,20 +771,20 @@ def chat(req: ChatRequest):
             temperature=0.7,
         )
     except Exception as exc:  # surface backend errors to the client
-        conversation.pop()  # roll back the user turn we optimistically added
+        convo.pop()  # roll back the user turn we optimistically added
         raise HTTPException(
             status_code=502, detail=f"Chat failed ({provider}): {exc}"
         ) from exc
 
     reply = completion.choices[0].message.content
-    conversation.append({"role": "assistant", "content": reply})
-    _save_conversation()
+    convo.append({"role": "assistant", "content": reply})
+    thread.save()
     # Re-window the archive so the new turns are retrievable next time (cheap,
     # incremental: only new chunks are embedded), then update long-term facts.
-    if conv_index is not None:
-        conv_index.rebuild(conversation)
-    if fact_store is not None:
-        fact_store.update(text, reply)
+    if thread.conv_index is not None:
+        thread.conv_index.rebuild(convo)
+    if thread.fact_store is not None:
+        thread.fact_store.update(text, reply)
     return ChatResponse(reply=reply)
 
 
@@ -760,9 +946,16 @@ def _concat_wavs(wav_blobs: list[bytes]) -> bytes:
 
 
 @app.get("/api/voices")
-def voices():
-    """List all selectable (offline Kokoro) voices and the default."""
-    return {"default": DEFAULT_VOICE, "voices": _available_voices()}
+def voices(gender: str | None = None):
+    """List selectable (offline Kokoro) voices and the default.
+
+    Pass ?gender=female|male to restrict to voices of that gender (used by the
+    character-creation flow once a gender is picked).
+    """
+    g = (gender or "").strip().lower() or None
+    if g and g not in characters_mod.GENDERS:
+        raise HTTPException(status_code=400, detail=f"gender must be one of {characters_mod.GENDERS}")
+    return {"default": DEFAULT_VOICE, "voices": _available_voices(g)}
 
 
 @app.post("/api/tts")
@@ -772,6 +965,9 @@ def tts(req: TTSRequest):
     Voice ids are namespaced "kokoro:<voice_key>". A bare/empty voice falls back
     to DEFAULT_VOICE.
 
+    The voice is resolved as: explicit `voice` > the character's stored voice
+    (if `character` is given) > DEFAULT_VOICE.
+
     *Asterisk-wrapped* segments are spoken in the hardcoded aside voice
     (ASTERISK_VOICE), padded with ASTERISK_PAUSE_SECONDS of silence before and
     after, and spliced back into the selected voice's audio, in order, as one clip.
@@ -780,7 +976,12 @@ def tts(req: TTSRequest):
     if not text:
         raise HTTPException(status_code=400, detail="Empty text")
 
-    voice_id = req.voice or DEFAULT_VOICE
+    voice_id = req.voice
+    if not voice_id and req.character:
+        char = char_store.get(req.character)
+        if char:
+            voice_id = char.get("voice")
+    voice_id = voice_id or DEFAULT_VOICE
     segments = _split_asterisk_segments(text) or [(text, False)]
 
     try:
@@ -809,4 +1010,5 @@ def health():
         "chat_providers": list(chat_clients),
         "tts_provider": TTS_PROVIDER,
         "stt_model": STT_MODEL,
+        "characters": len(char_store.characters),
     }

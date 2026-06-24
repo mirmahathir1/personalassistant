@@ -14,6 +14,9 @@ backend/facts.json
 backend/facts.json.tmp
 backend/settings.json
 backend/settings.json.tmp
+# Per-character threads: index + each character's history/facts/vectors live
+# under backend/data/<char_id>/. User data — kept out of git.
+backend/data/
 
 # --- Python ---
 backend/.venv/

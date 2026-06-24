@@ -26,6 +26,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 
 try:
@@ -99,6 +100,10 @@ class ConversationIndex:
         self._bm25 = None
         self._matrix = None
         self._embed_ok = embed_client is not None and np is not None
+        # Window size / stride for chunking; module defaults, overridable per
+        # instance (BioIndex sets both to 1 to index each paragraph alone).
+        self.window = WINDOW
+        self.stride = STRIDE
         self._load_vector_cache()
 
     # -- persistence --------------------------------------------------------
@@ -158,14 +163,15 @@ class ConversationIndex:
         self._chunks = []
         self._chunk_end = []
         if body:
-            step = max(1, STRIDE)
+            win = max(1, self.window)
+            step = max(1, self.stride)
             i = 0
             while i < len(body):
-                window = body[i:i + WINDOW]
+                window = body[i:i + win]
                 if window:
                     self._chunks.append(window)
                     self._chunk_end.append(min(i + len(window) - 1, len(body) - 1))
-                if i + WINDOW >= len(body):
+                if i + win >= len(body):
                     break
                 i += step
         self._chunk_texts = [_chunk_text(c) for c in self._chunks]
@@ -291,6 +297,55 @@ class ConversationIndex:
         except Exception as exc:
             print(f"[retrieval] rerank failed ({exc}); using fused order")
         return candidates[:top_k]
+
+
+class BioIndex:
+    """Hybrid retrieval over a character's static bio (long-form lore).
+
+    The bio is free-form prose, so we split it into paragraph "turns" and feed
+    them to a ConversationIndex. Unlike the conversation, the bio never grows and
+    has no "recent tail" to exclude — `retrieve` searches the whole thing.
+
+    Built once per character (the bio is immutable after creation). Reuses all of
+    ConversationIndex's BM25 + embedding + rerank machinery and its on-disk vector
+    cache, so bio chunks are embedded once and persist across restarts.
+    """
+
+    def __init__(self, vectors_path: Path, bio: str, embed_client=None,
+                 rerank_client=None, rerank_model: str = ""):
+        self._index = ConversationIndex(
+            vectors_path, embed_client=embed_client,
+            rerank_client=rerank_client, rerank_model=rerank_model,
+        )
+        # One chunk per non-blank paragraph, indexed individually. We override
+        # WINDOW/STRIDE to 1 on this index instance so each paragraph is its own
+        # retrievable unit: prose bios are usually a handful of paragraphs, and a
+        # multi-paragraph window would collapse short bios into a single chunk —
+        # which makes BM25's IDF degenerate (every term in 100% of docs scores 0).
+        # role="bio" keeps these out of any conversation-shaped logic.
+        self._index.window = 1
+        self._index.stride = 1
+        paras = [p.strip() for p in re.split(r"\n\s*\n", bio or "") if p.strip()]
+        self._turns = [{"role": "bio", "content": p} for p in paras]
+        self._index.rebuild(self._turns)
+
+    def retrieve(self, query: str, top_k: int = TOP_K) -> list[dict]:
+        """Up to `top_k` relevant bio chunks (no recent-tail exclusion)."""
+        if not self._turns:
+            return []
+        # recent_n=0 makes the whole bio eligible (recent_start == n_turns).
+        return self._index.retrieve(query, recent_n=0, top_k=top_k)
+
+
+def render_bio_block(chunks: list[list[dict]]) -> str:
+    """Format retrieved bio chunks as a system note about who the character is."""
+    # Bio turns carry a "bio:" role prefix internally; drop it when rendering so
+    # the prose reads naturally in the prompt.
+    parts = ["\n".join(t.get("content", "") for t in chunk) for chunk in chunks]
+    return (
+        "Relevant background about you (your own history/personality — speak and "
+        "act consistently with it):\n\n" + "\n---\n".join(parts)
+    )
 
 
 def render_context_block(chunks: list[list[dict]]) -> str:

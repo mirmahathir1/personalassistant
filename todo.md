@@ -96,6 +96,15 @@ No auth today — any LAN device can hit the API.
 - [ ] Define a key-management approach (derive from the user password / OS keystore).
 - [ ] Ensure auth tokens and credentials are never transmitted/stored in plaintext.
 
+> **Partly done (character feature).** Characters now exist: the home page is a
+> contact list, each character is its own chat thread with isolated history /
+> retrieval / facts under `backend/data/<char_id>/`, plus a fixed name, gender,
+> voice, and intelligence (3-stop slider → Llama 1B/3B/8B). This advances items
+> **7 (threads)** and **8 (profiles)**. Storage is **JSON-per-character** (not
+> SQLite yet) — the SQLite refactor those items suggest is still open if it
+> grows. Remaining for 7: rename/auto-title threads. Remaining for 8: age field,
+> age-appropriate prompt injection, tie to auth/encryption.
+
 ## 7. Multiple chat threads
 
 Today there is exactly **one** persisted thread (`conversation` global,

@@ -1,24 +1,46 @@
 # Openclaw Assistant
 
-A single-thread voice chat assistant — **fully offline**, no cloud calls, no API
-key. One conversation, no thread management.
+A multi-character voice chat assistant — **fully offline**, no cloud calls, no
+API key. Create characters; each is its own chat thread with its own voice,
+intelligence, and memory.
 
-- **Chat:** local Ollama `Llama-3.1-8B-Lexi-Uncensored-V2` (uncensored)
+- **Chat:** local Ollama (uncensored Llama 1B / 3B / 8B, picked per character)
 - **Speech-to-text:** local faster-whisper (`base.en` by default, on CPU)
-- **Text-to-speech:** local Kokoro neural TTS (`af_heart` / "Aria" by default,
-  ONNX on CPU) — noticeably more natural than the old Piper engine
+- **Text-to-speech:** local Kokoro neural TTS (ONNX on CPU) — noticeably more
+  natural than the old Piper engine
 - **Frontend:** Vue 3 + Vite
 - **Backend:** FastAPI
 
 Everything runs on your machine. The only network access is the one-time
 download of the Ollama models and the Kokoro/Whisper model files.
 
-The frontend header has a **voice dropdown**. The chosen voice is sent per
-request and routed by its `kokoro:` prefix.
+## Characters
+
+The home page is a **contact list** (empty at first). Create a character with:
+
+- **Name**
+- **Gender** (female / male) — gates the voice options
+- **Voice** — a Kokoro voice matching the chosen gender (the picker only appears
+  after a gender is selected, and lists only matching voices)
+- **Intelligence** — a 3-stop slider mapping to the three local chat models:
+  **Quick** → Llama 1B, **Balanced** → Llama 3B, **Smart** → Lexi 8B
+
+Creating a character adds a row to the list; tapping it opens that character's
+chat thread. **These settings are fixed at creation** — the contact pane shows
+them read-only. Each character has its own history, retrieval index, and
+long-term facts, stored under `backend/data/<char_id>/` (the index of all
+characters is `backend/data/characters.json`).
+
+On first run after upgrading from the old single-thread build, the existing
+conversation is folded into a character named **Emily** (Female, Smart, current
+voice). The legacy files (`backend/chat_history.json` etc.) are **copied, never
+deleted** — they stay on disk as a backup.
 
 - **Voices** (Kokoro): a single model + voices file (`models/kokoro/`) ship ~50
-  built-in voices; the dropdown exposes a curated subset defined by `_VOICE_LABELS`
-  in `backend/main.py`. Add a `"<kokoro_id>": "<label>"` entry to expose more.
+  built-in voices; the creation picker exposes a curated subset defined by
+  `_VOICE_LABELS` in `backend/main.py` (gender inferred from the `af_/bf_` =
+  female, `am_/bm_` = male id prefix). Add a `"<kokoro_id>": "<label>"` entry to
+  expose more.
 
 **Asterisk segments:** any text wrapped in `*asterisks*` (e.g. `*she whispers*`)
 is spoken in a hardcoded distinct **aside** voice (`af_nicole` / "Nicole")
@@ -156,14 +178,22 @@ Vite proxies `/api/*` to the backend on port 8000.
 
 ## API
 
-| Method | Path           | Body                          | Returns            |
-| ------ | -------------- | ----------------------------- | ------------------ |
-| GET    | `/api/health`  | —                             | status + model     |
-| GET    | `/api/history` | —                             | visible messages   |
-| POST   | `/api/chat`    | `{ "message": "..." }`        | `{ "reply": "..." }` |
-| POST   | `/api/tts`     | `{ "message": "..." }`        | `audio/wav`        |
-| POST   | `/api/stt`     | multipart file field `file`   | `{ "text": "..." }`  |
-| POST   | `/api/reset`   | —                             | `{ "ok": true }`   |
+Chat/history/tts/reset/delete are **scoped to a character** (by id). Voices can
+be filtered by gender for the creation flow.
+
+| Method | Path                       | Body / query                                   | Returns              |
+| ------ | -------------------------- | ---------------------------------------------- | -------------------- |
+| GET    | `/api/health`              | —                                              | status + char count  |
+| GET    | `/api/characters`          | —                                              | character list       |
+| POST   | `/api/characters`          | `{ name, gender, voice, intelligence }`        | created character    |
+| DELETE | `/api/characters/{id}`     | —                                              | `{ "ok": true }`     |
+| GET    | `/api/voices`              | `?gender=female\|male` (optional)              | voices + default     |
+| GET    | `/api/history`             | `?character=<id>`                              | visible messages     |
+| POST   | `/api/chat`                | `{ "message": "...", "character": "<id>" }`    | `{ "reply": "..." }` |
+| POST   | `/api/tts`                 | `{ "message": "...", "character": "<id>" }`    | `audio/wav`          |
+| POST   | `/api/stt`                 | multipart file field `file`                    | `{ "text": "..." }`  |
+| POST   | `/api/reset`               | `?character=<id>`                              | `{ "ok": true }`     |
+| POST   | `/api/delete`              | `{ "character": "<id>", "indices": [...] }`    | updated messages     |
 
 ## Notes
 
