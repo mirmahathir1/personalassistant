@@ -5,22 +5,23 @@ key. One conversation, no thread management.
 
 - **Chat:** local Ollama `Llama-3.1-8B-Lexi-Uncensored-V2` (uncensored)
 - **Speech-to-text:** local faster-whisper (`base.en` by default, on CPU)
-- **Text-to-speech:** local Piper (`en_US-amy-medium` by default, on CPU)
+- **Text-to-speech:** local Kokoro neural TTS (`af_heart` / "Aria" by default,
+  ONNX on CPU) — noticeably more natural than the old Piper engine
 - **Frontend:** Vue 3 + Vite
 - **Backend:** FastAPI
 
 Everything runs on your machine. The only network access is the one-time
-download of the Ollama models and Piper/Whisper model files.
+download of the Ollama models and the Kokoro/Whisper model files.
 
-The frontend header has a **voice dropdown** of the installed Piper voices. The
-chosen voice is sent per request and routed by its `piper:` prefix.
+The frontend header has a **voice dropdown**. The chosen voice is sent per
+request and routed by its `kokoro:` prefix.
 
-- **Voices** (Piper): curated by the sample WAVs in `backend/samples/` — a voice
-  appears only if both its model (`backend/voices/<id>.onnx`) and its sample
-  (`backend/samples/<name>.wav`) exist; delete a sample to drop it.
+- **Voices** (Kokoro): a single model + voices file (`models/kokoro/`) ship ~50
+  built-in voices; the dropdown exposes a curated subset defined by `_VOICE_LABELS`
+  in `backend/main.py`. Add a `"<kokoro_id>": "<label>"` entry to expose more.
 
 **Asterisk segments:** any text wrapped in `*asterisks*` (e.g. `*she whispers*`)
-is spoken in the hardcoded **Sofia** Piper voice (`en_US-libritts_r-medium`)
+is spoken in a hardcoded distinct **aside** voice (`af_nicole` / "Nicole")
 and spliced — in order — into the selected voice's audio as a single clip.
 Override it with the `ASTERISK_VOICE` env var.
 
@@ -42,17 +43,33 @@ Then open <http://localhost:5173>.
 
 No arguments and no API key. On first run the script auto-starts Ollama, pulls
 the Lexi Uncensored chat model and the embedding model, and downloads the
-default Piper voices (~60 MB each). The Whisper STT model downloads on first
-mic use. Requires [Ollama](https://ollama.com) installed.
+Kokoro TTS model + voices (~340 MB total, into `models/kokoro/`). The Whisper
+STT model downloads on first mic use. Requires [Ollama](https://ollama.com)
+installed.
+
+All models live in a **project-local `models/` folder** so the app stays self-
+contained and portable rather than scattering downloads across `~/.ollama` and
+`~/.cache/huggingface`. Llama (chat) + embedding models go to `models/` (via
+`OLLAMA_MODELS`, set by run.sh); the faster-whisper STT model goes to
+`models/whisper/` (via `download_root`, set in `backend/main.py`); the Kokoro
+TTS model + voices go to `models/kokoro/` (downloaded by run.sh). The folder is
+git-ignored — the models are large and re-downloaded on first run. If an Ollama
+server is already running, stop it (`pkill ollama`) before `./run.sh` so the
+project-local dir is used. Override locations with `OLLAMA_MODELS` /
+`STT_MODELS_DIR` / `KOKORO_MODELS_DIR`.
 
 ### Configuration (env vars)
 
 | Var              | Default                        | Meaning                                   |
 | ---------------- | ------------------------------ | ----------------------------------------- |
 | `CHAT_MODEL`     | Lexi Uncensored                | Override the Ollama chat model id pulled by run.sh |
+| `OLLAMA_MODELS`  | `./models`                     | Project-local dir Ollama stores all models in (keeps the app self-contained) |
 | `OLLAMA_BASE_URL`| `http://localhost:11434/v1`    | Ollama OpenAI-compatible endpoint         |
 | `STT_MODEL`      | `base.en`                      | faster-whisper model size (`tiny`/`base`/`small`/`medium`/`large-v3`, `.en` variants) |
-| `PIPER_VOICE`    | first available voice          | Default voice model id (filename stem)    |
+| `STT_MODELS_DIR` | `./models/whisper`             | Project-local dir faster-whisper downloads STT models into (instead of `~/.cache/huggingface`) |
+| `KOKORO_VOICE`   | `af_heart`                     | Default Kokoro voice key (the dropdown default) |
+| `KOKORO_MODELS_DIR` | `./models/kokoro`           | Project-local dir holding the Kokoro `.onnx` + voices file |
+| `ASTERISK_VOICE` | `af_nicole`                    | Kokoro voice used for `*asterisk*` aside segments |
 | `RETRIEVAL_ENABLED` | `1`                         | Set `0` to send the whole thread (legacy) instead of a retrieved slice |
 | `RETRIEVAL_RECENT_N`| `8`                         | Recent turns always sent verbatim         |
 | `RETRIEVAL_TOP_K`   | `5`                         | Reranked chunks of older context injected per request |
@@ -83,6 +100,7 @@ python3 -m venv .venv
 Make sure Ollama is running and the models are pulled:
 
 ```bash
+export OLLAMA_MODELS="$PWD/models"   # keep models project-local (run.sh does this for you)
 ollama serve &              # if not already running
 ollama pull hf.co/bartowski/Llama-3.1-8B-Lexi-Uncensored-V2-GGUF:Q4_K_M
 ollama pull nomic-embed-text   # for semantic retrieval (offline, ~270MB)
@@ -152,5 +170,6 @@ Vite proxies `/api/*` to the backend on port 8000.
 - Mic capture requires a secure context: `localhost` works; on a remote host
   you'll need HTTPS for the browser to grant microphone access.
 - Change the system prompt, chat model, or default voice at the top of
-  `backend/main.py`. Add more Piper voices by dropping `<id>.onnx` (+ `.onnx.json`)
-  into `backend/voices/` and a matching sample WAV into `backend/samples/`.
+  `backend/main.py`. Expose more of Kokoro's ~50 built-in voices by adding
+  `"<kokoro_id>": "<label>"` entries to `_VOICE_LABELS` in `backend/main.py` —
+  no extra downloads needed (every voice ships in `models/kokoro/voices-v1.0.bin`).

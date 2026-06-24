@@ -3,18 +3,30 @@
 #
 # Usage: ./run.sh
 #
-# No arguments. Fully offline: chat via local Ollama, TTS via local Piper, STT
+# No arguments. Fully offline: chat via local Ollama, TTS via local Kokoro, STT
 # via local faster-whisper. This script makes everything ready (Ollama server +
-# models, Piper voices, Python deps), then starts the servers. Ctrl-C stops.
+# models, Kokoro model+voices, Python deps), then starts the servers. Ctrl-C stops.
 set -e
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 
 OLLAMA_MODEL="${CHAT_MODEL:-hf.co/bartowski/Llama-3.1-8B-Lexi-Uncensored-V2-GGUF:Q4_K_M}"
 
+# Keep all Llama (chat) + embedding models in a project-local folder so the app
+# is self-contained and portable. Ollama reads this via OLLAMA_MODELS; we export
+# it for both `ollama serve` and the `ollama pull`/`ollama list` calls below.
+# Models are large and stay out of git (see .gitignore).
+export OLLAMA_MODELS="${OLLAMA_MODELS:-$ROOT/models}"
+mkdir -p "$OLLAMA_MODELS"
+
 # --- ollama: ensure the server is up and the chat + embedding models are pulled ---
 if command -v ollama >/dev/null 2>&1; then
-  if ! curl -s -o /dev/null http://localhost:11434/api/tags 2>/dev/null; then
-    echo "Starting ollama server..."
+  # If a server is already running, it may be using a different models dir than
+  # our project-local one. Warn so models don't silently land in ~/.ollama.
+  if curl -s -o /dev/null http://localhost:11434/api/tags 2>/dev/null; then
+    echo "Note: an ollama server is already running; it may not use OLLAMA_MODELS=$OLLAMA_MODELS." >&2
+    echo "      Stop it (e.g. 'pkill ollama') and re-run to use the project-local model dir." >&2
+  else
+    echo "Starting ollama server (models in $OLLAMA_MODELS)..."
     ollama serve > /tmp/ollama.log 2>&1 &
     until curl -s -o /dev/null http://localhost:11434/api/tags 2>/dev/null; do sleep 0.3; done
   fi
@@ -34,20 +46,20 @@ else
   exit 1
 fi
 
-# --- piper: ensure the default offline voice exists (for the offline voices) ---
-# Default offline voice + Sofia (used for *asterisk* segments).
-VOICE_DIR="$ROOT/backend/voices"
-PIPER_BASE="https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US"
-mkdir -p "$VOICE_DIR"
-download_voice() {  # $1=voice id, $2=path under en_US (e.g. amy/medium)
-  if [ ! -f "$VOICE_DIR/$1.onnx" ]; then
-    echo "Downloading Piper voice $1 (~60MB)..."
-    curl -sL -o "$VOICE_DIR/$1.onnx" "$PIPER_BASE/$2/$1.onnx"
-    curl -sL -o "$VOICE_DIR/$1.onnx.json" "$PIPER_BASE/$2/$1.onnx.json"
+# --- kokoro: ensure the neural TTS model + voice styles exist (offline) ---
+# One ONNX model (~310MB) + one voices file (~27MB, ~50 bundled voices) serve
+# every selectable voice. Kept project-local in models/kokoro/ (out of git).
+KOKORO_DIR="$ROOT/models/kokoro"
+KOKORO_BASE="https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0"
+mkdir -p "$KOKORO_DIR"
+download_kokoro() {  # $1=filename, $2=approx size for the message
+  if [ ! -f "$KOKORO_DIR/$1" ]; then
+    echo "Downloading Kokoro $1 ($2, first run only)..."
+    curl -fL --retry 3 -o "$KOKORO_DIR/$1" "$KOKORO_BASE/$1"
   fi
 }
-download_voice en_US-amy-medium amy/medium
-download_voice en_US-libritts_r-medium libritts_r/medium   # Sofia, for *asterisk* segments
+download_kokoro kokoro-v1.0.onnx "~310MB"
+download_kokoro voices-v1.0.bin "~27MB"
 
 # --- backend ---
 cd "$ROOT/backend"

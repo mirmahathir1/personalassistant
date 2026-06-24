@@ -19,7 +19,7 @@ const confirmNuke = ref(false)  // nuke-confirmation modal
 const nuking = ref(false)
 
 const voices = ref([])          // { id, label }
-const selectedVoice = ref('')   // namespaced voice id, e.g. "piper:en_US-amy-medium"
+const selectedVoice = ref('')   // namespaced voice id, e.g. "kokoro:af_heart"
 
 const providers = ref([])       // { id, label, model }
 const selectedProvider = ref('')// chat provider id, e.g. "ollama"

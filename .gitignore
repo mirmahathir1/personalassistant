@@ -42,6 +42,8 @@ yarn-error.log*
 *.swp
 *~
 
-# --- Piper offline voice models (download separately, ~60MB) ---
-backend/voices/*.onnx
-backend/voices/*.onnx.json
+# --- Local models: Kokoro TTS + Llama/embedding/Whisper (all under models/) ---
+# Kokoro neural TTS model + voices (~340MB) and the Llama/embedding GGUF blobs
+# live under models/ and are pulled on first run by run.sh. The download steps
+# are documented there. Kept out of git so the repo stays small.
+models/

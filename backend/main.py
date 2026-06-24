@@ -1,9 +1,9 @@
 """Single-thread voice chat backend — fully offline.
 
-Chat runs on local Ollama, text-to-speech on local Piper, and speech-to-text on
-a local faster-whisper model. No cloud calls and no API key. The whole app keeps
-exactly one conversation thread in memory, persisted to a JSON file across
-restarts.
+Chat runs on local Ollama, text-to-speech on local Kokoro (neural ONNX), and
+speech-to-text on a local faster-whisper model. No cloud calls and no API key.
+The whole app keeps exactly one conversation thread in memory, persisted to a
+JSON file across restarts.
 """
 
 import json
@@ -53,72 +53,66 @@ if OLLAMA_HOST.endswith("/v1"):
 # STT runs locally with faster-whisper. Model size: tiny/base/small/medium/large-v3.
 STT_MODEL = os.environ.get("STT_MODEL", "base.en")
 
-# TTS is local Piper only.
-TTS_PROVIDER = "piper"
+# Keep the downloaded faster-whisper models inside the project (project-local
+# `models/whisper/`) instead of the default ~/.cache/huggingface, so the app
+# stays self-contained and portable — same rationale as the Ollama models dir.
+# Override with STT_MODELS_DIR. Path is project-root/models/whisper.
+STT_CACHE_DIR = os.environ.get(
+    "STT_MODELS_DIR",
+    str(Path(__file__).resolve().parent.parent / "models" / "whisper"),
+)
 
-# Hardcoded offline voice used for *asterisk-wrapped* segments (always Piper).
-# "Sofia" = en_US-libritts_r-medium.
-ASTERISK_VOICE = os.environ.get("ASTERISK_VOICE", "en_US-libritts_r-medium")
+# TTS is local Kokoro (neural, ONNX on CPU) — noticeably more natural than the
+# previous Piper engine. Fully offline: the model + voice styles are downloaded
+# once into a project-local folder (same rationale as the Llama/Whisper dirs).
+TTS_PROVIDER = "kokoro"
 
-# Piper (offline) voices live in backend/voices/ as <id>.onnx (+ .onnx.json).
-# Selectable voices are those whose .onnx model is present on disk.
-VOICES_DIR = Path(__file__).resolve().parent / "voices"
+# Kokoro model + voice-style files live in project-root/models/kokoro/. Override
+# the dir with KOKORO_MODELS_DIR; override the filenames with KOKORO_MODEL /
+# KOKORO_VOICES. run.sh downloads them on first run.
+KOKORO_DIR = Path(
+    os.environ.get(
+        "KOKORO_MODELS_DIR",
+        str(Path(__file__).resolve().parent.parent / "models" / "kokoro"),
+    )
+)
+KOKORO_MODEL_PATH = KOKORO_DIR / os.environ.get("KOKORO_MODEL", "kokoro-v1.0.onnx")
+KOKORO_VOICES_PATH = KOKORO_DIR / os.environ.get("KOKORO_VOICES", "voices-v1.0.bin")
 
-# Friendly display names; ids are the .onnx filename stems.
+# Curated subset of Kokoro's ~50 built-in voices, with friendly display names.
+# Ids are Kokoro's own voice keys (af_=US female, am_=US male, bf_/bm_=British).
+# Only ids present in this map are offered in the dropdown; extend it to expose
+# more of the bundled voices (the full set is in voices-v1.0.bin).
 _VOICE_LABELS = {
-    "en_US-amy-medium": "Amy",
-    "en_US-hfc_female-medium": "Hannah",
-    "en_US-libritts_r-medium": "Sofia",
-    "en_US-kristin-medium": "Kristin",
-    "en_US-kathleen-low": "Kathleen",
-    "en_US-lessac-medium": "Lessac",
+    "af_heart": "Aria (US, warm)",
+    "af_bella": "Bella (US)",
+    "af_nicole": "Nicole (US, soft)",
+    "af_sarah": "Sarah (US)",
+    "am_michael": "Michael (US, male)",
+    "am_fenrir": "Fenrir (US, male)",
+    "bf_emma": "Emma (UK)",
+    "bm_george": "George (UK, male)",
 }
 
-
-SAMPLES_DIR = Path(__file__).resolve().parent / "samples"
-
-# Map a voice id to its short sample-file stem (used to curate the menu).
-_VOICE_SAMPLE = {
-    "en_US-amy-medium": "amy",
-    "en_US-hfc_female-medium": "hfc_female",
-    "en_US-libritts_r-medium": "libritts_r",
-    "en_US-kristin-medium": "kristin",
-    "en_US-kathleen-low": "kathleen",
-    "en_US-lessac-medium": "lessac",
-}
-
-
-def _piper_voices() -> list[dict]:
-    """Offline Piper voices: model present on disk AND a kept sample WAV.
-
-    Deleting a sample under backend/samples/ removes that voice from the menu,
-    so the curated set is whatever samples you keep.
-    """
-    out = []
-    for onnx in sorted(VOICES_DIR.glob("*.onnx")):
-        vid = onnx.stem
-        sample = _VOICE_SAMPLE.get(vid, vid)
-        if not (SAMPLES_DIR / f"{sample}.wav").exists():
-            continue
-        out.append({"id": f"piper:{vid}", "label": _VOICE_LABELS.get(vid, vid)})
-    return sorted(out, key=lambda v: v["label"])
+# Hardcoded voice used for *asterisk-wrapped* segments (stage directions, e.g.
+# *he sighs*). A distinct, expressive voice so they read as an aside. Must be a
+# valid Kokoro voice id; override with ASTERISK_VOICE.
+ASTERISK_VOICE = os.environ.get("ASTERISK_VOICE", "af_nicole")
 
 
 def _available_voices() -> list[dict]:
-    """All selectable (offline Piper) voices."""
-    return _piper_voices()
+    """All selectable (offline Kokoro) voices, in label order."""
+    out = [{"id": f"kokoro:{vid}", "label": label} for vid, label in _VOICE_LABELS.items()]
+    return sorted(out, key=lambda v: v["label"])
 
 
-# Default offline voice id, e.g. "piper:en_US-amy-medium". PIPER_VOICE optionally
-# overrides which model is the default (filename stem).
-_PIPER_DEFAULT_MODEL = os.environ.get("PIPER_VOICE", "")
+# Default voice id, e.g. "kokoro:af_nicole". KOKORO_VOICE optionally overrides
+# which Kokoro voice key is the default.
+_KOKORO_DEFAULT = os.environ.get("KOKORO_VOICE", "af_nicole")
 
 
 def _default_voice_id() -> str:
-    if _PIPER_DEFAULT_MODEL:
-        return f"piper:{_PIPER_DEFAULT_MODEL}"
-    avail = _available_voices()
-    return avail[0]["id"] if avail else f"piper:{ASTERISK_VOICE}"
+    return f"kokoro:{_KOKORO_DEFAULT}"
 
 
 DEFAULT_VOICE = _default_voice_id()
@@ -150,27 +144,32 @@ def _get_whisper():
     if _whisper_model is None:
         from faster_whisper import WhisperModel  # imported lazily
 
-        # int8 on CPU keeps it light; faster-whisper auto-downloads the model.
-        _whisper_model = WhisperModel(STT_MODEL, device="cpu", compute_type="int8")
+        # int8 on CPU keeps it light; faster-whisper auto-downloads the model
+        # into the project-local STT_CACHE_DIR (not ~/.cache/huggingface).
+        os.makedirs(STT_CACHE_DIR, exist_ok=True)
+        _whisper_model = WhisperModel(
+            STT_MODEL, device="cpu", compute_type="int8", download_root=STT_CACHE_DIR
+        )
     return _whisper_model
 
 
-# Offline TTS: load each Piper voice once, lazily, and cache it by id.
-_piper_cache: dict[str, object] = {}
+# Offline TTS: load the Kokoro model once, lazily (all voice styles ship in the
+# single voices file, so one engine instance serves every voice id).
+_kokoro = None
 
 
-def _get_piper_voice(voice_id: str):
-    if voice_id not in _piper_cache:
-        from piper import PiperVoice  # imported lazily
+def _get_kokoro():
+    global _kokoro
+    if _kokoro is None:
+        from kokoro_onnx import Kokoro  # imported lazily (heavy: onnxruntime)
 
-        onnx = VOICES_DIR / f"{voice_id}.onnx"
-        if not onnx.exists():
+        if not KOKORO_MODEL_PATH.exists() or not KOKORO_VOICES_PATH.exists():
             raise RuntimeError(
-                f"Piper voice {voice_id!r} not found at {onnx}. "
-                "Download it into backend/voices/ (see README)."
+                f"Kokoro model/voices not found in {KOKORO_DIR}. "
+                "Download them into models/kokoro/ (see README / run.sh)."
             )
-        _piper_cache[voice_id] = PiperVoice.load(str(onnx))
-    return _piper_cache[voice_id]
+        _kokoro = Kokoro(str(KOKORO_MODEL_PATH), str(KOKORO_VOICES_PATH))
+    return _kokoro
 
 
 print(f"[startup] tts default provider={TTS_PROVIDER} default voice={DEFAULT_VOICE}")
@@ -365,7 +364,7 @@ class ChatResponse(BaseModel):
 
 class TTSRequest(BaseModel):
     message: str
-    voice: str | None = None  # Piper voice id; falls back to DEFAULT_VOICE
+    voice: str | None = None  # Kokoro voice id; falls back to DEFAULT_VOICE
 
 
 class SettingsRequest(BaseModel):
@@ -631,15 +630,28 @@ async def stt(file: UploadFile = File(...)):
     return {"text": text}
 
 
-def _tts_piper(text: str, voice_id: str) -> bytes:
-    """Synthesize WAV bytes fully offline with Piper."""
+def _tts_kokoro(text: str, voice_id: str) -> bytes:
+    """Synthesize WAV bytes fully offline with Kokoro.
+
+    Kokoro returns float32 samples + a sample rate; we encode them to a 16-bit
+    PCM WAV (the format the splicing/concat code and browser expect).
+    """
     import io
     import wave
 
-    voice = _get_piper_voice(voice_id)
+    import numpy as np
+
+    samples, sample_rate = _get_kokoro().create(text, voice=voice_id, lang="en-us")
+    # float32 in [-1, 1] -> 16-bit signed PCM.
+    pcm = np.clip(samples, -1.0, 1.0)
+    pcm = (pcm * 32767.0).astype("<i2")
+
     buf = io.BytesIO()
     with wave.open(buf, "wb") as wf:
-        voice.synthesize_wav(text, wf)
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(sample_rate)
+        wf.writeframes(pcm.tobytes())
     return buf.getvalue()
 
 
@@ -668,14 +680,18 @@ def _split_asterisk_segments(text: str) -> list[tuple[str, bool]]:
 
 
 def _synthesize(text: str, voice_id: str, asterisk: bool) -> bytes:
-    """Synthesize one segment's WAV; asterisk segments force the Sofia Piper voice."""
+    """Synthesize one segment's WAV; asterisk segments force the aside voice.
+
+    Voice ids are namespaced "<engine>:<id>". Only the Kokoro engine exists today;
+    the prefix is kept so a second engine can be added without changing callers.
+    """
     if asterisk:
-        return _tts_piper(text, ASTERISK_VOICE)
+        return _tts_kokoro(text, ASTERISK_VOICE)
     provider, _, name = voice_id.partition(":")
     if not name:
-        provider, name = "piper", voice_id
-    if provider == "piper":
-        return _tts_piper(text, name)
+        provider, name = "kokoro", voice_id
+    if provider == "kokoro":
+        return _tts_kokoro(text, name)
     raise RuntimeError(f"Unknown voice provider {provider!r} in {voice_id!r}.")
 
 
@@ -688,11 +704,32 @@ def _wav_params(wav_bytes: bytes):
         return wf.getnchannels(), wf.getsampwidth(), wf.getframerate(), wf.readframes(wf.getnframes())
 
 
+def _silence_wav(seconds: float, like: bytes) -> bytes:
+    """A silent WAV of `seconds`, matching the channels/width/rate of `like`."""
+    import io
+    import wave
+
+    ch, w, r, _ = _wav_params(like)
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as wf:
+        wf.setnchannels(ch)
+        wf.setsampwidth(w)
+        wf.setframerate(r)
+        wf.writeframes(b"\x00" * int(seconds * r) * ch * w)
+    return buf.getvalue()
+
+
+# Silence padded before and after each *asterisk* aside so it stands apart from
+# the surrounding speech. Override with ASTERISK_PAUSE_SECONDS.
+ASTERISK_PAUSE_SECONDS = float(os.environ.get("ASTERISK_PAUSE_SECONDS", "2"))
+
+
 def _concat_wavs(wav_blobs: list[bytes]) -> bytes:
     """Concatenate WAVs into one, resampling/normalizing to a common format.
 
-    Different Piper voices can have different sample rates (e.g. 22.05kHz vs
-    24kHz), so each is converted to the first segment's channels/width/rate.
+    Kokoro voices all share one format (24kHz mono), but the normalization is
+    kept so segments still splice cleanly if a future engine differs — each is
+    converted to the first segment's channels/width/rate.
     """
     import audioop
     import io
@@ -724,19 +761,20 @@ def _concat_wavs(wav_blobs: list[bytes]) -> bytes:
 
 @app.get("/api/voices")
 def voices():
-    """List all selectable (offline Piper) voices and the default."""
+    """List all selectable (offline Kokoro) voices and the default."""
     return {"default": DEFAULT_VOICE, "voices": _available_voices()}
 
 
 @app.post("/api/tts")
 def tts(req: TTSRequest):
-    """Synthesize speech with Piper, routing by the voice id's provider prefix.
+    """Synthesize speech with Kokoro, routing by the voice id's provider prefix.
 
-    Voice ids are namespaced "piper:<model_id>". A bare/empty voice falls back
+    Voice ids are namespaced "kokoro:<voice_key>". A bare/empty voice falls back
     to DEFAULT_VOICE.
 
-    *Asterisk-wrapped* segments are spoken in the hardcoded Sofia Piper voice
-    and spliced back into the selected voice's audio, in order, as one clip.
+    *Asterisk-wrapped* segments are spoken in the hardcoded aside voice
+    (ASTERISK_VOICE), padded with ASTERISK_PAUSE_SECONDS of silence before and
+    after, and spliced back into the selected voice's audio, in order, as one clip.
     """
     text = req.message.strip()
     if not text:
@@ -746,7 +784,15 @@ def tts(req: TTSRequest):
     segments = _split_asterisk_segments(text) or [(text, False)]
 
     try:
-        clips = [_synthesize(chunk, voice_id, is_ast) for (chunk, is_ast) in segments]
+        clips: list[bytes] = []
+        for chunk, is_ast in segments:
+            clip = _synthesize(chunk, voice_id, is_ast)
+            if is_ast and ASTERISK_PAUSE_SECONDS > 0:
+                # Bracket the aside with silence so it stands apart from speech.
+                pause = _silence_wav(ASTERISK_PAUSE_SECONDS, clip)
+                clips += [pause, clip, pause]
+            else:
+                clips.append(clip)
         audio_bytes = _concat_wavs(clips)
     except HTTPException:
         raise

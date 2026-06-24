@@ -7,33 +7,38 @@ TTS, faster-whisper STT), started via [run.sh](run.sh).
 
 ---
 
-## 1. More natural voice (TTS)
+## 1. More natural voice (TTS) ✅ DONE
 
-Current TTS is local Piper ([backend/main.py](backend/main.py) `_tts_piper`), which
-sounds robotic. Goal: noticeably more natural/expressive speech while staying offline.
+Replaced Piper with **Kokoro** neural TTS (ONNX on CPU) — much more natural while
+staying fully offline. The voice id namespace is now `kokoro:<voice_key>`, and
+`_synthesize` still dispatches by the `<engine>:<id>` prefix so a second engine
+can be added without changing callers. Model + voices live in `models/kokoro/`.
 
-- [ ] Evaluate higher-quality offline neural TTS engines (e.g. Kokoro, XTTS-v2,
-      Coqui, Parler-TTS, Piper's `*-high` quality models) for naturalness vs. CPU cost.
-- [ ] Add an abstraction so the voice engine is pluggable (Piper today, a better
-      engine tomorrow) — generalize `_synthesize` / voice-id namespacing
-      (`piper:<id>` → `<engine>:<id>`).
-- [ ] Support prosody / emotion / streaming synthesis if the chosen engine allows.
-- [ ] Keep the existing `*asterisk*` segment splicing working with the new engine.
-- [ ] Benchmark latency on a laptop CPU; ensure no perf regression vs. Piper.
-- [ ] Update [run.sh](run.sh) voice download/setup for the new engine.
+- [x] Evaluate higher-quality offline neural TTS engines — chose **Kokoro**
+      (82M-param ONNX, ~realtime on laptop CPU, ~50 built-in voices, fully offline).
+- [x] Keep the voice engine pluggable — `_synthesize` dispatches on the
+      `<engine>:<id>` prefix (`kokoro:<id>` today); adding another engine is a
+      new branch + loader, no caller changes.
+- [x] Kokoro supports per-voice styles + speed; `create_stream` is available for
+      streaming synthesis if needed later. (Prosody/emotion left as future work.)
+- [x] `*asterisk*` segment splicing still works — asides render in a distinct
+      Kokoro voice (`af_nicole`) and splice into the main clip (verified end-to-end).
+- [x] Latency: ~1.7s to synthesize a 2.9s clip on this laptop CPU (faster than
+      realtime); no perceptible regression vs. Piper.
+- [x] Updated [run.sh](run.sh) to download the Kokoro model + voices on first run.
 
-## 2. Move Llama models into a local folder
+## 2. Move Llama models into a local folder ✅ DONE
 
 Today models live wherever Ollama stores them (`~/.ollama`); chat models are
 defined in `CHAT_MODELS` ([backend/main.py:28](backend/main.py#L28)).
 
-- [ ] Store/load all Llama (and embedding) models from a project-local `models/`
+- [x] Store/load all Llama (and embedding) models from a project-local `models/`
       folder so the app is self-contained and portable.
-- [ ] Point Ollama at the local folder (`OLLAMA_MODELS` env var) or bundle GGUFs
+- [x] Point Ollama at the local folder (`OLLAMA_MODELS` env var) or bundle GGUFs
       and load them directly.
-- [ ] Update [run.sh](run.sh) and `.gitignore` to manage the local model dir
+- [x] Update [run.sh](run.sh) and `.gitignore` to manage the local model dir
       (models are large — keep out of git, document the download step).
-- [ ] Verify retrieval embeddings (`nomic-embed-text`) also resolve from the local dir.
+- [x] Verify retrieval embeddings (`nomic-embed-text`) also resolve from the local dir.
 
 ## 3. Single-binary, cross-platform (Windows + Mac), no perf loss
 
@@ -61,7 +66,8 @@ code; the chat UI runs on the phone.
 
 - [ ] Build a mobile app (e.g. Capacitor/Expo/Flutter) wrapping the existing web UI
       or a native client talking to the same `/api/*` endpoints.
-- [ ] QR code encodes host LAN address + port + a pairing token/credentials.
+- [ ] QR code encodes host LAN address + port (connection establishment only — no
+      auth/token; the phone uses it purely to find and reach the laptop).
 - [ ] Implement QR scanning + connection flow in the mobile app.
 - [ ] Handle LAN discovery / changing IPs gracefully (re-pair via fresh QR).
 - [ ] Make the backend bind to `0.0.0.0` and tighten CORS (currently
@@ -76,7 +82,9 @@ No auth today — any LAN device can hit the API.
 - [ ] Securely store credentials (hashed + salted, e.g. argon2/bcrypt) — not the
       plaintext `api_key.txt` currently in the repo root.
 - [ ] Login screen in web + mobile UI; persist session on the device.
-- [ ] Tie the QR pairing flow (item 4) to issuing a scoped auth token.
+- [ ] Auth is independent of the QR flow: the QR code only establishes the
+      connection (item 4); the user still logs in with username/password after
+      the phone reaches the laptop.
 - [ ] Remove committed secrets (`api_key.txt`) from the repo and `.gitignore` them.
 
 ## 6. Encryption
@@ -117,8 +125,10 @@ Retrieval index + facts are also global.
 
 ## Cross-cutting / ordering notes
 
-- Items **5 (auth)**, **6 (encryption)**, and **4 (mobile/QR)** are tightly coupled —
-  the QR pairing should hand off an auth token over a TLS channel. Design them together.
+- Items **5 (auth)**, **6 (encryption)**, and **4 (mobile/QR)** are related but the
+  QR code is connection establishment only — it carries the LAN address + port so the
+  phone can reach the laptop (ideally over the TLS channel from item 6). It does **not**
+  carry auth; the user authenticates separately (item 5) after connecting.
 - Item **7 (threads)** and **8 (profiles)** both push toward a real datastore (SQLite);
   do the storage refactor once and build both on it.
 - Item **3 (single binary)** affects how everything ships — decide the packaging

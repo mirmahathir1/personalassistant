@@ -3,7 +3,9 @@ uvicorn[standard]==0.34.0
 # OpenAI-compatible client — talks to the local Ollama server (no cloud calls).
 openai==1.59.6
 python-multipart==0.0.20
-piper-tts==1.4.2
+# Local neural TTS (offline, ONNX on CPU) — noticeably more natural than Piper.
+# Ships its own espeak-ng via espeakng-loader, so no system package is needed.
+kokoro-onnx==0.5.0
 # Local speech-to-text (offline Whisper, on CPU). `requests` is an undeclared
 # runtime dep of faster-whisper's model downloader, so pin it explicitly.
 faster-whisper==1.1.0
