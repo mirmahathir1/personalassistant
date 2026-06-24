@@ -4,7 +4,7 @@ A multi-character voice chat assistant — **fully offline**, no cloud calls, no
 API key. Create characters; each is its own chat thread with its own voice,
 intelligence, and memory.
 
-- **Chat:** local Ollama (uncensored Llama 1B / 3B / 8B, picked per character)
+- **Chat:** local Ollama (uncensored Qwen3 1.7B / Llama 3B / Lexi 8B, picked per character)
 - **Speech-to-text:** local faster-whisper (`base.en` by default, on CPU)
 - **Text-to-speech:** local Kokoro neural TTS (ONNX on CPU) — noticeably more
   natural than the old Piper engine
@@ -23,7 +23,7 @@ The home page is a **contact list** (empty at first). Create a character with:
 - **Voice** — a Kokoro voice matching the chosen gender (the picker only appears
   after a gender is selected, and lists only matching voices)
 - **Intelligence** — a 3-stop slider mapping to the three local chat models:
-  **Quick** → Llama 1B, **Balanced** → Llama 3B, **Smart** → Lexi 8B
+  **Quick** → Qwen3 1.7B (abliterated), **Balanced** → Llama 3B, **Smart** → Lexi 8B
 
 Creating a character adds a row to the list; tapping it opens that character's
 chat thread. **These settings are fixed at creation** — the contact pane shows

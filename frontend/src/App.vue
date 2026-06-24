@@ -36,8 +36,14 @@ const newPersonaCore = ref('')    // short identity blurb → always in the syst
 const newBio = ref('')            // long-form lore → indexed, surfaced on demand
 const genderVoices = ref([])      // voices for the picked gender
 
+// Model download state, shown in the creation modal when the chosen
+// intelligence's Ollama model isn't present yet.
+const downloading = ref(false)
+const dlText = ref('')            // human-readable progress line
+const dlPercent = ref(null)       // 0..100, or null for an indeterminate bar
+
 const INTELLIGENCE_LEVELS = ['low', 'medium', 'high']
-const INTELLIGENCE_LABELS = ['Quick (1B)', 'Balanced (3B)', 'Smart (8B)']
+const INTELLIGENCE_LABELS = ['Quick (1.7B)', 'Balanced (3B)', 'Smart (8B)']
 
 const messagesEl = ref(null)
 let mediaRecorder = null
@@ -107,7 +113,72 @@ function openCreate() {
   newBio.value = ''
   genderVoices.value = []
   createError.value = ''
+  downloading.value = false
+  dlText.value = ''
+  dlPercent.value = null
   createOpen.value = true
+}
+
+// Maps the intelligence slider level → the backend chat provider id (mirrors
+// INTELLIGENCE_PROVIDER in characters.py). The model/status + model/pull
+// endpoints key off this provider.
+const INTELLIGENCE_PROVIDER = { low: 'ollama-1b', medium: 'ollama-3b', high: 'ollama' }
+
+// Stream the model pull for `provider`, updating the progress bar. Resolves when
+// the model is fully present; rejects on error. Uses fetch + a streamed reader
+// rather than EventSource since the pull endpoint is POST.
+async function downloadModel(provider) {
+  downloading.value = true
+  dlText.value = 'Preparing download…'
+  dlPercent.value = null
+  try {
+    const res = await fetch('/api/model/pull', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chatProvider: provider }),
+    })
+    if (!res.ok || !res.body) {
+      const err = await res.json().catch(() => ({}))
+      throw new Error(err.detail || `HTTP ${res.status}`)
+    }
+    const reader = res.body.getReader()
+    const decoder = new TextDecoder()
+    let buf = ''
+    for (;;) {
+      const { value, done } = await reader.read()
+      if (done) break
+      buf += decoder.decode(value, { stream: true })
+      // SSE frames are separated by a blank line.
+      const frames = buf.split('\n\n')
+      buf = frames.pop() // keep the trailing partial frame
+      for (const frame of frames) {
+        const line = frame.split('\n').find((l) => l.startsWith('data:'))
+        if (!line) continue
+        let evt
+        try {
+          evt = JSON.parse(line.slice(5).trim())
+        } catch {
+          continue
+        }
+        if (evt.error) throw new Error(evt.error)
+        if (evt.completed != null && evt.total) {
+          dlPercent.value = Math.floor((evt.completed / evt.total) * 100)
+          const mb = (n) => (n / 1e6).toFixed(0)
+          dlText.value = `Downloading… ${mb(evt.completed)} / ${mb(evt.total)} MB`
+        } else if (evt.status) {
+          dlText.value = evt.status
+          // Status-only lines (verifying, manifest, etc.) → indeterminate bar.
+          if (evt.completed == null) dlPercent.value = null
+        }
+        if (evt.done) {
+          dlPercent.value = 100
+          dlText.value = 'Download complete'
+        }
+      }
+    }
+  } finally {
+    downloading.value = false
+  }
 }
 
 async function pickGender(g) {
@@ -129,10 +200,21 @@ const canCreate = computed(
 )
 
 async function submitCreate() {
-  if (!canCreate.value || creating.value) return
+  if (!canCreate.value || creating.value || downloading.value) return
   creating.value = true
   createError.value = ''
   try {
+    // Ensure the model for the chosen intelligence is downloaded first; if not,
+    // pull it with a progress bar before creating the character.
+    const provider = INTELLIGENCE_PROVIDER[INTELLIGENCE_LEVELS[newIntelligence.value]]
+    const statusRes = await fetch(`/api/model/status?provider=${encodeURIComponent(provider)}`)
+    if (!statusRes.ok) {
+      const err = await statusRes.json().catch(() => ({}))
+      throw new Error(err.detail || `Could not check model (HTTP ${statusRes.status})`)
+    }
+    const { present } = await statusRes.json()
+    if (!present) await downloadModel(provider)
+
     const res = await fetch('/api/characters', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -615,7 +697,7 @@ onUnmounted(() => document.removeEventListener('click', onDocClick))
             <div class="contact-section">
               <div class="info-row"><span class="info-key">Gender</span><span class="info-val">{{ activeChar?.gender }}</span></div>
               <div class="info-row"><span class="info-key">Voice</span><span class="info-val">{{ voiceLabel(activeChar?.voice) }}</span></div>
-              <div class="info-row"><span class="info-key">Intelligence</span><span class="info-val">{{ { low: 'Quick (1B)', medium: 'Balanced (3B)', high: 'Smart (8B)' }[activeChar?.intelligence] }}</span></div>
+              <div class="info-row"><span class="info-key">Intelligence</span><span class="info-val">{{ { low: 'Quick (1.7B)', medium: 'Balanced (3B)', high: 'Smart (8B)' }[activeChar?.intelligence] }}</span></div>
               <p class="info-note">Settings are locked after creation.</p>
             </div>
 
@@ -773,12 +855,34 @@ onUnmounted(() => document.removeEventListener('click', onDocClick))
           so length is cheap — write as much as you like.
         </p>
 
+        <!-- Model download progress (only while pulling a missing model) -->
+        <div v-if="downloading" class="model-dl">
+          <div class="model-status">
+            <span class="model-status-text">{{ dlText }}</span>
+            <span v-if="dlPercent != null">{{ dlPercent }}%</span>
+          </div>
+          <div class="model-bar">
+            <div
+              class="model-bar-fill"
+              :class="{ indeterminate: dlPercent == null }"
+              :style="dlPercent != null ? { width: dlPercent + '%' } : {}"
+            ></div>
+          </div>
+          <p class="field-hint">Downloading this character's model — this happens once per model.</p>
+        </div>
+
         <p v-if="createError" class="create-error">{{ createError }}</p>
 
         <div class="modal-actions">
-          <button class="modal-cancel" @click="createOpen = false">Cancel</button>
-          <button class="modal-create" :disabled="!canCreate || creating" @click="submitCreate">
-            {{ creating ? 'Creating…' : 'Create' }}
+          <button class="modal-cancel" :disabled="creating || downloading" @click="createOpen = false">
+            Cancel
+          </button>
+          <button
+            class="modal-create"
+            :disabled="!canCreate || creating || downloading"
+            @click="submitCreate"
+          >
+            {{ downloading ? 'Downloading…' : creating ? 'Creating…' : 'Create' }}
           </button>
         </div>
       </div>

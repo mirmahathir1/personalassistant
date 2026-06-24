@@ -918,6 +918,19 @@ textarea:focus {
   font-size: 13px;
   margin: 14px 0 0;
 }
+/* Model-download progress block in the create modal */
+.model-dl {
+  margin-top: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.model-dl .model-status {
+  color: var(--wa-text);
+}
+.model-dl .field-hint {
+  margin-top: 2px;
+}
 .modal-create {
   background: var(--wa-green);
   border: none;

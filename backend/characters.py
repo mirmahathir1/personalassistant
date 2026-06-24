@@ -5,7 +5,7 @@ long-term facts, kept under ``data/<char_id>/``. The character index (name,
 gender, voice, intelligence) lives in ``data/characters.json``.
 
 A character's *intelligence* maps onto one of the three existing Ollama chat
-models (no new downloads): low->1B, medium->3B, high->8B. Its *gender* gates
+models (no new downloads): low->1.7B, medium->3B, high->8B. Its *gender* gates
 which Kokoro voices are offered (af_/bf_ = female, am_/bm_ = male).
 
 Settings (name, gender, voice, intelligence) are chosen at creation time and are
@@ -31,7 +31,7 @@ INTELLIGENCE_LEVELS = ("low", "medium", "high")
 
 # Intelligence level -> existing chat provider id (see CHAT_MODELS in main.py).
 INTELLIGENCE_PROVIDER = {
-    "low": "ollama-1b",   # Llama 1B, fastest
+    "low": "ollama-1b",   # Qwen3 1.7B abliterated, fastest + most uncensored
     "medium": "ollama-3b",  # Llama 3B
     "high": "ollama",     # Lexi 8B, smartest
 }

@@ -31,14 +31,15 @@ CHAT_MODELS = {
     "ollama": "hf.co/bartowski/Llama-3.1-8B-Lexi-Uncensored-V2-GGUF:Q4_K_M",
     # lighter uncensored Llama-3.2 3B (bartowski abliterated build), ~2GB vs ~4.9GB
     "ollama-3b": "hf.co/bartowski/Llama-3.2-3B-Instruct-uncensored-GGUF:Q4_K_M",
-    # lightest: abliterated Llama-3.2 1B (huihui_ai), ~0.8GB — direct Ollama pull
-    "ollama-1b": "huihui_ai/llama3.2-abliterate:1b",
+    # lightest + most uncensored sub-3B: abliterated Qwen3 1.7B (huihui_ai),
+    # ~1.1GB — lower refusal rate than the old Llama-3.2 1B abliterate, still tiny.
+    "ollama-1b": "huihui_ai/qwen3-abliterated:1.7b",
 }
 # Friendly labels for the dropdown.
 CHAT_LABELS = {
     "ollama": "Local Lexi 8B (uncensored)",
     "ollama-3b": "Local Llama 3B (uncensored, lighter)",
-    "ollama-1b": "Local Llama 1B (uncensored, lightest)",
+    "ollama-1b": "Local Qwen3 1.7B (most uncensored, lightest)",
 }
 
 # Default provider used when a request doesn't specify one.
