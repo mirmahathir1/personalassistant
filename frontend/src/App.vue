@@ -24,6 +24,11 @@ const selectedVoice = ref('')   // namespaced voice id, e.g. "piper:en_US-amy-me
 const providers = ref([])       // { id, label, model }
 const selectedProvider = ref('')// chat provider id, e.g. "ollama"
 
+// Model download (Ollama pull) state for the contact pane.
+const modelPulling = ref(false) // a pull is currently streaming
+const modelStatus = ref('')     // human-readable progress line
+const modelPct = ref(null)      // 0..100 download percentage, or null when unknown
+
 const messagesEl = ref(null)
 let mediaRecorder = null
 let audioChunks = []
@@ -373,7 +378,92 @@ async function saveSettings() {
   }
 }
 
-watch([selectedProvider, selectedVoice], saveSettings)
+// Non-streaming check: does the selected provider's model already exist?
+// Used on startup so we don't auto-trigger a long pull before the user asks.
+async function checkModelStatus(provider) {
+  if (!provider) return
+  try {
+    const res = await fetch(`/api/model/status?provider=${encodeURIComponent(provider)}`)
+    if (!res.ok) return
+    const data = await res.json()
+    modelStatus.value = data.present ? 'Model ready' : 'Not downloaded'
+    modelPct.value = data.present ? 100 : null
+  } catch {
+    // non-fatal: pane just shows no status
+  }
+}
+
+// Ensure the selected provider's Ollama model is downloaded, streaming pull
+// progress from the backend's SSE endpoint into the contact pane.
+async function ensureModel(provider) {
+  if (!provider) return
+  modelPulling.value = true
+  modelStatus.value = 'Checking model…'
+  modelPct.value = null
+  try {
+    const res = await fetch('/api/model/pull', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chatProvider: provider }),
+    })
+    if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`)
+
+    const reader = res.body.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ''
+    while (true) {
+      const { value, done } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+      // SSE frames are separated by a blank line.
+      let sep
+      while ((sep = buffer.indexOf('\n\n')) !== -1) {
+        const frame = buffer.slice(0, sep)
+        buffer = buffer.slice(sep + 2)
+        const line = frame.split('\n').find((l) => l.startsWith('data:'))
+        if (!line) continue
+        let evt
+        try {
+          evt = JSON.parse(line.slice(5).trim())
+        } catch {
+          continue
+        }
+        if (evt.error) {
+          modelStatus.value = `Download failed: ${evt.error}`
+          modelPct.value = null
+          modelPulling.value = false
+          return
+        }
+        if (evt.done) {
+          modelStatus.value = 'Model ready'
+          modelPct.value = 100
+          modelPulling.value = false
+          return
+        }
+        if (typeof evt.completed === 'number' && evt.total > 0) {
+          modelPct.value = Math.floor((evt.completed / evt.total) * 100)
+        }
+        if (evt.status) modelStatus.value = evt.status
+      }
+    }
+    // Stream ended without an explicit done event.
+    modelPulling.value = false
+  } catch (e) {
+    modelStatus.value = `Download failed: ${e.message}`
+    modelPct.value = null
+    modelPulling.value = false
+  }
+}
+
+// Voice changes only need persisting; provider changes also (re)check the model.
+// Both are gated on settingsLoaded so applying saved values during startup
+// doesn't POST them back or kick off a spurious pull.
+watch(selectedVoice, saveSettings)
+watch(selectedProvider, (provider) => {
+  if (!settingsLoaded) return
+  saveSettings()
+  ensureModel(provider)
+})
 
 // Close the three-dot menu when clicking anywhere outside it.
 function onDocClick() {
@@ -386,6 +476,7 @@ onMounted(async () => {
   // Load the option lists first so saved selections can be validated against them.
   await Promise.all([loadVoices(), loadProviders()])
   await loadSettings()
+  checkModelStatus(selectedProvider.value)
 })
 
 onUnmounted(() => document.removeEventListener('click', onDocClick))
@@ -500,6 +591,21 @@ onUnmounted(() => document.removeEventListener('click', onDocClick))
                 {{ p.label }}
               </option>
             </select>
+            <div class="model-status">
+              <span class="model-status-text">{{ modelStatus }}</span>
+              <button
+                v-if="!modelPulling && modelPct !== 100"
+                class="model-pull-btn"
+                @click="ensureModel(selectedProvider)"
+              >Download</button>
+            </div>
+            <div v-if="modelPulling || (modelPct !== null && modelPct < 100)" class="model-bar">
+              <div
+                class="model-bar-fill"
+                :class="{ indeterminate: modelPct === null }"
+                :style="modelPct !== null ? { width: modelPct + '%' } : {}"
+              ></div>
+            </div>
           </div>
 
           <div class="contact-section">

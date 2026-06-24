@@ -9,11 +9,13 @@ restarts.
 import json
 import os
 import re
+import threading
 from pathlib import Path
 
+import requests
 from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response
+from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
 from openai import OpenAI
 
@@ -28,17 +30,25 @@ CHAT_MODELS = {
     "ollama": "hf.co/bartowski/Llama-3.1-8B-Lexi-Uncensored-V2-GGUF:Q4_K_M",
     # lighter uncensored Llama-3.2 3B (bartowski abliterated build), ~2GB vs ~4.9GB
     "ollama-3b": "hf.co/bartowski/Llama-3.2-3B-Instruct-uncensored-GGUF:Q4_K_M",
+    # lightest: abliterated Llama-3.2 1B (huihui_ai), ~0.8GB — direct Ollama pull
+    "ollama-1b": "huihui_ai/llama3.2-abliterate:1b",
 }
 # Friendly labels for the dropdown.
 CHAT_LABELS = {
     "ollama": "Local Lexi 8B (uncensored)",
     "ollama-3b": "Local Llama 3B (uncensored, lighter)",
+    "ollama-1b": "Local Llama 1B (uncensored, lightest)",
 }
 
 # Default provider used when a request doesn't specify one.
 DEFAULT_CHAT_PROVIDER = os.environ.get("CHAT_PROVIDER", "ollama").strip().lower()
 
 OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434/v1")
+# Ollama's native REST API (model list/pull) lives at the host root, not under
+# the OpenAI-compatible /v1 prefix used for chat. Derive it from the same base.
+OLLAMA_HOST = OLLAMA_BASE_URL.rstrip("/")
+if OLLAMA_HOST.endswith("/v1"):
+    OLLAMA_HOST = OLLAMA_HOST[: -len("/v1")]
 
 # STT runs locally with faster-whisper. Model size: tiny/base/small/medium/large-v3.
 STT_MODEL = os.environ.get("STT_MODEL", "base.en")
@@ -120,9 +130,10 @@ SYSTEM_PROMPT = "You are a helpful, concise voice assistant. Keep replies natura
 # is ignored. Kept as a dict so the per-request `provider` field keeps working.
 _ollama_client = OpenAI(base_url=OLLAMA_BASE_URL, api_key="ollama")  # key ignored by Ollama
 chat_clients = {
-    # Both providers talk to the same local Ollama; only the model id differs.
+    # All providers talk to the same local Ollama; only the model id differs.
     "ollama": _ollama_client,
     "ollama-3b": _ollama_client,
+    "ollama-1b": _ollama_client,
 }
 
 if DEFAULT_CHAT_PROVIDER not in chat_clients:
@@ -312,8 +323,16 @@ def _load_settings() -> dict:
     return {**_SETTINGS_DEFAULTS, **data}
 
 
+# Serializes settings read-modify-write+save. The frontend can POST provider +
+# voice near-simultaneously, and FastAPI runs sync endpoints in a threadpool, so
+# concurrent saves would otherwise race (and a shared tmp path would have its
+# source renamed away mid-replace, raising FileNotFoundError).
+_settings_lock = threading.Lock()
+
+
 def _save_settings() -> None:
-    tmp = SETTINGS_FILE.with_suffix(".json.tmp")
+    # Unique tmp name per write so concurrent saves never share a tmp path.
+    tmp = SETTINGS_FILE.with_suffix(f".json.{os.getpid()}.{threading.get_ident()}.tmp")
     tmp.write_text(json.dumps(settings, ensure_ascii=False, indent=2))
     tmp.replace(SETTINGS_FILE)
 
@@ -370,9 +389,10 @@ def get_settings():
 def update_settings(req: SettingsRequest):
     """Persist any provided dropdown selections; unknown/None fields are ignored."""
     incoming = {k: v for k, v in req.model_dump().items() if v is not None}
-    settings.update({k: v for k, v in incoming.items() if k in _SETTINGS_DEFAULTS})
-    _save_settings()
-    return settings
+    with _settings_lock:
+        settings.update({k: v for k, v in incoming.items() if k in _SETTINGS_DEFAULTS})
+        _save_settings()
+        return dict(settings)
 
 
 @app.get("/api/history")
@@ -438,6 +458,109 @@ def providers():
             for p in chat_clients
         ],
     }
+
+
+# ---------------------------------------------------------------------------
+# Ollama model management: check whether a provider's model is downloaded, and
+# pull it (streaming progress) if not. Uses Ollama's native REST API on the
+# host root (not the /v1 OpenAI-compat prefix used for chat).
+# ---------------------------------------------------------------------------
+
+
+def _ollama_installed_models() -> set[str]:
+    """Names of models currently present locally (via Ollama's /api/tags)."""
+    resp = requests.get(f"{OLLAMA_HOST}/api/tags", timeout=10)
+    resp.raise_for_status()
+    return {m.get("name", "") for m in resp.json().get("models", [])}
+
+
+def _model_is_present(model: str, installed: set[str] | None = None) -> bool:
+    """True if `model` is already downloaded.
+
+    Ollama appends ``:latest`` to a tagless name in /api/tags, so match either
+    the exact id or its ``:latest`` form.
+    """
+    if installed is None:
+        installed = _ollama_installed_models()
+    return model in installed or f"{model}:latest" in installed
+
+
+def _resolve_model(provider: str | None) -> str:
+    """Map a provider id to its model string, or raise 400."""
+    p = (provider or DEFAULT_CHAT_PROVIDER).strip().lower()
+    if p not in CHAT_MODELS:
+        raise HTTPException(status_code=400, detail=f"Unknown chat provider {p!r}")
+    return CHAT_MODELS[p]
+
+
+@app.get("/api/model/status")
+def model_status(provider: str | None = None):
+    """Report whether the selected provider's Ollama model is downloaded."""
+    model = _resolve_model(provider)
+    try:
+        present = _model_is_present(model)
+    except requests.RequestException as exc:
+        raise HTTPException(status_code=502, detail=f"Ollama unreachable: {exc}")
+    return {"provider": provider or DEFAULT_CHAT_PROVIDER, "model": model, "present": present}
+
+
+@app.post("/api/model/pull")
+def model_pull(req: SettingsRequest):
+    """Ensure the selected provider's model is downloaded, streaming progress.
+
+    Returns an SSE stream of JSON events:
+      {"status": "..."}                          progress text from Ollama
+      {"completed": N, "total": M}               byte counts during download
+      {"done": true, "model": "..."}             finished (already-present or pulled)
+      {"error": "..."}                           failure
+    Each event is one ``data: <json>\\n\\n`` SSE frame.
+    """
+    model = _resolve_model(req.chatProvider)
+
+    def event_stream():
+        def sse(payload: dict) -> str:
+            return f"data: {json.dumps(payload)}\n\n"
+
+        try:
+            if _model_is_present(model):
+                yield sse({"status": "already downloaded", "model": model})
+                yield sse({"done": True, "model": model})
+                return
+        except requests.RequestException as exc:
+            yield sse({"error": f"Ollama unreachable: {exc}"})
+            return
+
+        try:
+            with requests.post(
+                f"{OLLAMA_HOST}/api/pull",
+                json={"model": model, "stream": True},
+                stream=True,
+                timeout=(10, None),  # connect timeout; no read timeout (pulls are long)
+            ) as resp:
+                resp.raise_for_status()
+                for line in resp.iter_lines():
+                    if not line:
+                        continue
+                    try:
+                        evt = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if evt.get("error"):
+                        yield sse({"error": evt["error"]})
+                        return
+                    out = {}
+                    if "status" in evt:
+                        out["status"] = evt["status"]
+                    if "completed" in evt and "total" in evt:
+                        out["completed"] = evt["completed"]
+                        out["total"] = evt["total"]
+                    if out:
+                        yield sse(out)
+            yield sse({"done": True, "model": model})
+        except requests.RequestException as exc:
+            yield sse({"error": f"Pull failed: {exc}"})
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
 @app.post("/api/chat", response_model=ChatResponse)
