@@ -95,9 +95,10 @@ _VOICE_LABELS = {
     "bm_george": "George (UK, male)",
 }
 
-# Hardcoded voice used for *asterisk-wrapped* segments (stage directions, e.g.
-# *he sighs*). A distinct, expressive voice so they read as an aside. Must be a
-# valid Kokoro voice id; override with ASTERISK_VOICE.
+# A default female Kokoro voice id, used only as the fallback voice when folding
+# a legacy gender-less thread into the "Emily" character (see migration below).
+# *Asterisk* asides are no longer spoken (they become silence), so this is not a
+# TTS voice for them. Override with ASTERISK_VOICE.
 ASTERISK_VOICE = os.environ.get("ASTERISK_VOICE", "af_nicole")
 
 
@@ -865,14 +866,13 @@ def _split_asterisk_segments(text: str) -> list[tuple[str, bool]]:
     return [(s, a) for (s, a) in segments if s.strip()]
 
 
-def _synthesize(text: str, voice_id: str, asterisk: bool) -> bytes:
-    """Synthesize one segment's WAV; asterisk segments force the aside voice.
+def _synthesize(text: str, voice_id: str) -> bytes:
+    """Synthesize one spoken segment's WAV in the given voice.
 
     Voice ids are namespaced "<engine>:<id>". Only the Kokoro engine exists today;
     the prefix is kept so a second engine can be added without changing callers.
+    (*Asterisk* asides are never synthesized — they become silence in the caller.)
     """
-    if asterisk:
-        return _tts_kokoro(text, ASTERISK_VOICE)
     provider, _, name = voice_id.partition(":")
     if not name:
         provider, name = "kokoro", voice_id
@@ -890,12 +890,25 @@ def _wav_params(wav_bytes: bytes):
         return wf.getnchannels(), wf.getsampwidth(), wf.getframerate(), wf.readframes(wf.getnframes())
 
 
-def _silence_wav(seconds: float, like: bytes) -> bytes:
-    """A silent WAV of `seconds`, matching the channels/width/rate of `like`."""
+# Kokoro's native output format (mono, 16-bit PCM, 24kHz). Used to synthesize
+# standalone silence when there's no neighbouring clip to copy the format from
+# (e.g. a message that is entirely an *asterisk* aside).
+_KOKORO_CHANNELS, _KOKORO_SAMPWIDTH, _KOKORO_RATE = 1, 2, 24000
+
+
+def _silence_wav(seconds: float, like: bytes | None = None) -> bytes:
+    """A silent WAV of `seconds`.
+
+    Copies the channels/width/rate of `like` when given; otherwise falls back to
+    Kokoro's native format so silence can stand on its own.
+    """
     import io
     import wave
 
-    ch, w, r, _ = _wav_params(like)
+    if like is not None:
+        ch, w, r, _ = _wav_params(like)
+    else:
+        ch, w, r = _KOKORO_CHANNELS, _KOKORO_SAMPWIDTH, _KOKORO_RATE
     buf = io.BytesIO()
     with wave.open(buf, "wb") as wf:
         wf.setnchannels(ch)
@@ -905,9 +918,20 @@ def _silence_wav(seconds: float, like: bytes) -> bytes:
     return buf.getvalue()
 
 
-# Silence padded before and after each *asterisk* aside so it stands apart from
-# the surrounding speech. Override with ASTERISK_PAUSE_SECONDS.
-ASTERISK_PAUSE_SECONDS = float(os.environ.get("ASTERISK_PAUSE_SECONDS", "2"))
+# *Asterisk* asides (stage directions, e.g. *he sighs*) are NOT spoken — they're
+# replaced by a pause. The pause length scales with the aside's word count so a
+# longer action reads as a longer beat, clamped to [MIN, MAX] seconds. Tune the
+# per-word rate and bounds via the env vars below.
+ASTERISK_PAUSE_PER_WORD = float(os.environ.get("ASTERISK_PAUSE_PER_WORD", "0.35"))
+ASTERISK_PAUSE_MIN_SECONDS = float(os.environ.get("ASTERISK_PAUSE_MIN_SECONDS", "0.6"))
+ASTERISK_PAUSE_MAX_SECONDS = float(os.environ.get("ASTERISK_PAUSE_MAX_SECONDS", "3"))
+
+
+def _asterisk_pause_seconds(aside_text: str) -> float:
+    """How long a silent pause to leave in place of an (unspoken) asterisk aside."""
+    words = len(aside_text.split())
+    secs = words * ASTERISK_PAUSE_PER_WORD
+    return max(ASTERISK_PAUSE_MIN_SECONDS, min(ASTERISK_PAUSE_MAX_SECONDS, secs))
 
 
 def _concat_wavs(wav_blobs: list[bytes]) -> bytes:
@@ -968,9 +992,9 @@ def tts(req: TTSRequest):
     The voice is resolved as: explicit `voice` > the character's stored voice
     (if `character` is given) > DEFAULT_VOICE.
 
-    *Asterisk-wrapped* segments are spoken in the hardcoded aside voice
-    (ASTERISK_VOICE), padded with ASTERISK_PAUSE_SECONDS of silence before and
-    after, and spliced back into the selected voice's audio, in order, as one clip.
+    *Asterisk-wrapped* segments (stage directions, e.g. *he sighs*) are NOT
+    spoken: each is replaced by a silent pause whose length scales with the
+    aside's word count, spliced into the spoken audio in order, as one clip.
     """
     text = req.message.strip()
     if not text:
@@ -987,13 +1011,12 @@ def tts(req: TTSRequest):
     try:
         clips: list[bytes] = []
         for chunk, is_ast in segments:
-            clip = _synthesize(chunk, voice_id, is_ast)
-            if is_ast and ASTERISK_PAUSE_SECONDS > 0:
-                # Bracket the aside with silence so it stands apart from speech.
-                pause = _silence_wav(ASTERISK_PAUSE_SECONDS, clip)
-                clips += [pause, clip, pause]
+            if is_ast:
+                # Don't voice the aside — leave a pause in its place.
+                clips.append(_silence_wav(_asterisk_pause_seconds(chunk)))
             else:
-                clips.append(clip)
+                clips.append(_synthesize(chunk, voice_id))
+        # A message that's entirely an aside collapses to just silence.
         audio_bytes = _concat_wavs(clips)
     except HTTPException:
         raise

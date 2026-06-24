@@ -683,15 +683,9 @@ onUnmounted(() => document.removeEventListener('click', onDocClick))
         <button class="delete-cancel" @click="toggleSelectMode">Cancel</button>
       </div>
 
-      <div class="status" :class="{ error: statusError }">{{ status }}</div>
+      <div v-if="status" class="status" :class="{ error: statusError }">{{ status }}</div>
 
       <div v-if="mode === 'text'" class="composer">
-        <button
-          class="icon-btn"
-          :class="{ recording }"
-          title="Record"
-          @click="toggleRecord"
-        >🎤</button>
         <textarea
           v-model="input"
           rows="1"
