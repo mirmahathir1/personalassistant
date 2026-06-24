@@ -453,7 +453,7 @@ print(f"[startup] {len(char_store.characters)} character(s) available")
 # App
 # ---------------------------------------------------------------------------
 
-app = FastAPI(title="Openclaw Assistant")
+app = FastAPI(title="WhatsApp Uncensored")
 
 app.add_middleware(
     CORSMiddleware,

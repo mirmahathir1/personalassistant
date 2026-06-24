@@ -744,13 +744,13 @@ textarea:focus {
   display: flex;
   align-items: center;
   gap: 14px;
-  width: 100%;
   text-align: left;
   background: transparent;
   border: none;
-  border-bottom: 1px solid var(--wa-divider);
   color: var(--wa-text);
-  padding: 12px 16px;
+  padding: 12px;
+  margin: 2px 6px;
+  border-radius: var(--r-md);
   cursor: pointer;
   font-family: inherit;
 }
