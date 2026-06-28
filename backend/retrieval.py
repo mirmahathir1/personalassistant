@@ -58,7 +58,57 @@ STRIDE = int(os.environ.get("RETRIEVAL_STRIDE", "2"))
 EMBED_MODEL = os.environ.get("EMBED_MODEL", "nomic-embed-text")
 # LLM rerank on by default; needs a chat client passed in. Falls back to fused order.
 RERANK_ENABLED = os.environ.get("RETRIEVAL_RERANK", "1").strip().lower() not in {"0", "false", "no"}
+# Minimum cosine similarity for an embedding candidate to be eligible. KNN always
+# returns `CANDIDATES` neighbours even when nothing is actually relevant, so an
+# unrelated chunk gets injected into *every* prompt — the single biggest source of
+# hallucination/contradiction in a RAG-augmented chat. Filtering here, before the
+# chunk can reach the rerank or the prompt, is open-webui's RELEVANCE_THRESHOLD
+# (their #1 documented pitfall). 0 disables; ~0.5 is a sane start, tune per model.
+RELEVANCE_THRESHOLD = float(os.environ.get("RETRIEVAL_RELEVANCE_THRESHOLD", "0.5"))
+# When the LLM reranker omits everything (judges all candidates irrelevant), inject
+# NOTHING rather than backfilling the top fused candidates. Trusts the reranker's
+# "omit irrelevant" instruction instead of overriding it. Off => legacy backfill.
+RERANK_STRICT = os.environ.get("RETRIEVAL_RERANK_STRICT", "1").strip().lower() not in {"0", "false", "no"}
 _RRF_K = 60
+
+
+def _parse_index_list(text: str) -> "list[int] | None":
+    """Pull a list of integer indices out of a reranker reply, tolerantly.
+
+    Small local models rarely emit one clean JSON array: they wrap it in ```fences,
+    prepend reasoning, or print the picks on multiple lines ("[1]\\n[2,0]"). The old
+    find("[")..rfind("]") slice spanned several arrays at once and json.loads then
+    raised "Extra data: ...". Here we (1) try to json.loads the first *balanced*
+    bracket span, and (2) fall back to scraping every integer in document order.
+    Returns the indices, or None if the reply contained no integers at all (which
+    the caller treats as a deliberate "nothing relevant").
+    """
+    # 1. First balanced [...] span — stops at the matching close bracket, so a
+    #    second array on the next line is no longer swept into the parse.
+    depth = 0
+    span_start = -1
+    for i, ch in enumerate(text):
+        if ch == "[":
+            if depth == 0:
+                span_start = i
+            depth += 1
+        elif ch == "]":
+            if depth > 0:
+                depth -= 1
+                if depth == 0:
+                    try:
+                        val = json.loads(text[span_start:i + 1])
+                    except json.JSONDecodeError:
+                        break  # malformed first span; fall through to integer scrape
+                    if isinstance(val, list):
+                        ints = [v for v in val if isinstance(v, int)]
+                        if ints or val == []:
+                            return ints
+                    break
+    # 2. Last resort: every integer mentioned, in order. Handles "1, 2, 0" with no
+    #    brackets at all, or reasoning prose that names the indices.
+    ints = [int(m) for m in re.findall(r"-?\d+", text)]
+    return ints if ints else None
 
 
 def _tokenize(text: str) -> list[str]:
@@ -220,29 +270,37 @@ class ConversationIndex:
         renders them via render_context_block().
         """
         if not self._chunks:
+            print("[retrieval] retrieve: index empty; nothing to search")
             return []
         # A chunk is eligible only if it ends before the recent tail begins.
         n_turns = self._chunk_end[-1] + 1 if self._chunk_end else 0
         recent_start = max(0, n_turns - recent_n)
         eligible = [i for i, end in enumerate(self._chunk_end) if end < recent_start]
         if not eligible:
+            print(f"[retrieval] retrieve: all {len(self._chunks)} chunks are in the recent tail; nothing older to retrieve")
             return []
         elig_set = set(eligible)
 
         bm25_ranks = [i for i in self._bm25_candidates(query) if i in elig_set]
         emb_ranks = [i for i in self._embedding_candidates(query) if i in elig_set]
+        print(
+            f"[retrieval] retrieve: {len(self._chunks)} chunks "
+            f"({len(eligible)} eligible) -> bm25 {len(bm25_ranks)}, embed {len(emb_ranks)} candidates"
+        )
 
         scores: dict[int, float] = {}
         for ranks in (bm25_ranks, emb_ranks):
             for rank, idx in enumerate(ranks):
                 scores[idx] = scores.get(idx, 0.0) + 1.0 / (_RRF_K + rank)
         if not scores:
+            print("[retrieval] retrieve: no candidates passed filtering; injecting none")
             return []
 
         fused = sorted(scores, key=lambda i: scores[i], reverse=True)[:RERANK_CANDIDATES]
         # C. LLM rerank the fused candidates down to top_k (falls back to fused order).
         chosen = self._rerank(query, fused, top_k)
         chosen.sort()  # chronological for the prompt
+        print(f"[retrieval] retrieve: returning {len(chosen)} chunk(s) for injection")
         return [self._chunks[i] for i in chosen]
 
     def _bm25_candidates(self, query: str) -> list[int]:
@@ -259,8 +317,19 @@ class ConversationIndex:
         qv = self._embed([query])
         if not qv:
             return []
-        sims = self._matrix @ qv[0]
-        return [int(i) for i in np.argsort(-sims)[:CANDIDATES]]
+        sims = self._matrix @ qv[0]  # cosine: both sides are L2-normalised
+        order = [int(i) for i in np.argsort(-sims)[:CANDIDATES]]
+        # Drop neighbours below the relevance floor so an unrelated chunk can't be
+        # injected just because KNN always returns *something* (see RELEVANCE_THRESHOLD).
+        if RELEVANCE_THRESHOLD > 0:
+            kept = [i for i in order if sims[i] >= RELEVANCE_THRESHOLD]
+            top = float(sims[order[0]]) if order else 0.0
+            print(
+                f"[retrieval] embed: top sim {top:.3f}, "
+                f"{len(kept)}/{len(order)} >= threshold {RELEVANCE_THRESHOLD}"
+            )
+            order = kept
+        return order
 
     def _rerank(self, query: str, candidates: list[int], top_k: int) -> list[int]:
         """Score each candidate chunk's relevance with the chat model; keep top_k.
@@ -286,16 +355,30 @@ class ConversationIndex:
                 model=self.rerank_model,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0,
+                max_tokens=256,  # output is a short JSON array of indices; cap it
             )
             text = resp.choices[0].message.content or ""
-            start, end = text.find("["), text.rfind("]")
-            order = json.loads(text[start:end + 1]) if start != -1 and end != -1 else []
+            order = _parse_index_list(text)
+            if order is None:
+                # No integers anywhere in the reply — couldn't extract a ranking.
+                print(f"[retrieval] rerank: unparseable reply {text[:120]!r}; using fused order")
+                return candidates[:top_k]
             picked = [candidates[n] for n in order
                       if isinstance(n, int) and 0 <= n < len(candidates)]
             if picked:
+                print(f"[retrieval] rerank: {len(candidates)} candidates -> kept {len(picked[:top_k])}")
                 return picked[:top_k]
+            # Reranker ran and returned a well-formed but empty selection: it judged
+            # every candidate irrelevant. In strict mode honour that (inject nothing)
+            # instead of overriding it with the top fused candidates — backfilling
+            # here is what reintroduces the off-topic context the rerank just rejected.
+            if RERANK_STRICT:
+                print(f"[retrieval] rerank: all {len(candidates)} candidates judged irrelevant; injecting none")
+                return []
+            print(f"[retrieval] rerank: empty selection; backfilling top {top_k} fused")
         except Exception as exc:
             print(f"[retrieval] rerank failed ({exc}); using fused order")
+        # Parse failure or rerank disabled: fall back to the fused order.
         return candidates[:top_k]
 
 

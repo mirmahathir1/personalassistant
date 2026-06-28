@@ -52,6 +52,7 @@ def rewrite_query(client, model: str, recent_turns: list[dict], message: str) ->
             model=model,
             messages=[{"role": "user", "content": prompt}],
             temperature=0,
+            max_tokens=256,  # a rewritten query is short; cap so it can't run away
         )
         out = (resp.choices[0].message.content or "").strip()
         # Keep both: the rewrite may drop keywords the original had.
@@ -119,6 +120,7 @@ class FactStore:
                 model=self.model,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0,
+                max_tokens=512,  # the JSON fact delta is small; cap so it can't run away
             )
             text = resp.choices[0].message.content or ""
             start, end = text.find("{"), text.rfind("}")
@@ -130,17 +132,24 @@ class FactStore:
             return
 
         remove = {str(f).strip() for f in obj.get("remove", []) if str(f).strip()}
+        removed = [f for f in self.facts if f in remove]
         if remove:
             self.facts = [f for f in self.facts if f not in remove]
         seen = {f.lower() for f in self.facts}
+        added = []
         for f in obj.get("add", []):
             f = str(f).strip()
             if f and f.lower() not in seen:
                 self.facts.append(f)
                 seen.add(f.lower())
+                added.append(f)
         # Keep the store bounded; drop oldest first.
         if len(self.facts) > MAX_FACTS:
             self.facts = self.facts[-MAX_FACTS:]
+        if added:
+            print(f"[memory] +{len(added)} fact(s): " + "; ".join(added))
+        if removed:
+            print(f"[memory] -{len(removed)} fact(s): " + "; ".join(removed))
         self._save()
 
     def prune_facts(self, deleted_texts: list[str]) -> list[str]:
@@ -174,6 +183,7 @@ class FactStore:
                 model=self.model,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0,
+                max_tokens=512,  # the JSON array of facts to remove is small; cap it
             )
             text = resp.choices[0].message.content or ""
             start, end = text.find("["), text.rfind("]")

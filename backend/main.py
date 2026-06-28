@@ -98,8 +98,7 @@ _VOICE_LABELS = {
 
 # A default female Kokoro voice id, used only as the fallback voice when folding
 # a legacy gender-less thread into the "Emily" character (see migration below).
-# *Asterisk* asides are no longer spoken (they become silence), so this is not a
-# TTS voice for them. Override with ASTERISK_VOICE.
+# Override with ASTERISK_VOICE.
 ASTERISK_VOICE = os.environ.get("ASTERISK_VOICE", "af_nicole")
 
 
@@ -310,25 +309,40 @@ class CharacterThread:
         # Rewrite the message into a standalone retrieval query, gather hybrid
         # candidates over windowed chunks, LLM-rerank to the best few.
         query = memory.rewrite_query(_LLM_CLIENT, _LLM_MODEL, recent, message)
+        if query != message:
+            print(f"[chat:{self.id}] query rewritten -> {query[:120]!r}")
         chunks = self.conv_index.retrieve(query, retrieval.RECENT_N, retrieval.TOP_K)
         # Drop any chunk overlapping the recent tail we already send verbatim.
         recent_ids = {id(m) for m in recent}
         chunks = [c for c in chunks if not any(id(t) in recent_ids for t in c)]
 
-        messages = list(system)
+        # Collect every system fragment (persona, bio, long-term facts, retrieved
+        # context) and merge them into ONE system message. Ollama's chat templates
+        # (Llama 3, Qwen) only render the *first* system turn and drop later ones,
+        # so emitting separate system messages silently lost the facts/bio blocks —
+        # which is exactly "the character forgets long-term facts". One block also
+        # makes ordering explicit: identity first, then what it knows, then context.
+        sys_parts = [system[0]["content"]] if system else [self.system_prompt]
         if self.bio_index is not None:  # relevant slice of the character's own bio
             bio_chunks = self.bio_index.retrieve(query, retrieval.TOP_K)
             if bio_chunks:
-                messages.append(
-                    {"role": "system", "content": retrieval.render_bio_block(bio_chunks)}
-                )
+                sys_parts.append(retrieval.render_bio_block(bio_chunks))
         if self.fact_store is not None:  # always-on long-term facts
             block = self.fact_store.render_block()
             if block:
-                messages.append({"role": "system", "content": block})
+                sys_parts.append(block)
         if chunks:
-            messages.append({"role": "system", "content": retrieval.render_context_block(chunks)})
+            sys_parts.append(retrieval.render_context_block(chunks))
+
+        messages = [{"role": "system", "content": "\n\n".join(sys_parts)}]
         messages.extend(recent)
+        # One line summarising what actually reaches the model this turn: how many
+        # system fragments, retrieved chunks, long-term facts, and verbatim turns.
+        n_facts = len(self.fact_store.facts) if self.fact_store is not None else 0
+        print(
+            f"[chat:{self.id}] context: {len(sys_parts)} system part(s) "
+            f"({len(chunks)} retrieved chunk(s), {n_facts} fact(s)), {len(recent)} recent turn(s)"
+        )
         return messages
 
 
@@ -760,6 +774,10 @@ def chat(req: ChatRequest):
         )
 
     thread = _get_thread(char["id"])
+    print(
+        f"[chat:{char['id']}] {char.get('name','?')} ({provider}) "
+        f"<- {text[:80]!r} | thread has {len([m for m in thread.conversation if m['role']!='system'])} turn(s)"
+    )
     convo = thread.conversation
     convo.append({"role": "user", "content": text})
     # Build the bounded slice (system + retrieved older context + recent turns).
@@ -771,6 +789,7 @@ def chat(req: ChatRequest):
             model=CHAT_MODELS[provider],
             messages=messages,
             temperature=0.7,
+            max_tokens=1024,  # cap output so a runaway/looping generation can't hang the request
         )
     except Exception as exc:  # surface backend errors to the client
         convo.pop()  # roll back the user turn we optimistically added
@@ -779,6 +798,7 @@ def chat(req: ChatRequest):
         ) from exc
 
     reply = completion.choices[0].message.content
+    print(f"[chat:{char['id']}] -> {len(reply or '')} chars")
     convo.append({"role": "assistant", "content": reply})
     thread.save()
     # Re-window the archive so the new turns are retrievable next time (cheap,
@@ -786,7 +806,11 @@ def chat(req: ChatRequest):
     if thread.conv_index is not None:
         thread.conv_index.rebuild(convo)
     if thread.fact_store is not None:
+        before = len(thread.fact_store.facts)
         thread.fact_store.update(text, reply)
+        after = len(thread.fact_store.facts)
+        if after != before:
+            print(f"[chat:{char['id']}] facts: {before} -> {after}")
     return ChatResponse(reply=reply)
 
 
@@ -863,7 +887,7 @@ def _split_asterisk_segments(text: str) -> list[tuple[str, bool]]:
         pos = m.end()
     if pos < len(text):
         segments.append((text[pos:], False))
-    # Drop blank/whitespace-only chunks so we don't synthesize silence.
+    # Drop blank/whitespace-only chunks so we don't synthesize empty audio.
     return [(s, a) for (s, a) in segments if s.strip()]
 
 
@@ -872,7 +896,6 @@ def _synthesize(text: str, voice_id: str) -> bytes:
 
     Voice ids are namespaced "<engine>:<id>". Only the Kokoro engine exists today;
     the prefix is kept so a second engine can be added without changing callers.
-    (*Asterisk* asides are never synthesized — they become silence in the caller.)
     """
     provider, _, name = voice_id.partition(":")
     if not name:
@@ -889,50 +912,6 @@ def _wav_params(wav_bytes: bytes):
 
     with wave.open(io.BytesIO(wav_bytes), "rb") as wf:
         return wf.getnchannels(), wf.getsampwidth(), wf.getframerate(), wf.readframes(wf.getnframes())
-
-
-# Kokoro's native output format (mono, 16-bit PCM, 24kHz). Used to synthesize
-# standalone silence when there's no neighbouring clip to copy the format from
-# (e.g. a message that is entirely an *asterisk* aside).
-_KOKORO_CHANNELS, _KOKORO_SAMPWIDTH, _KOKORO_RATE = 1, 2, 24000
-
-
-def _silence_wav(seconds: float, like: bytes | None = None) -> bytes:
-    """A silent WAV of `seconds`.
-
-    Copies the channels/width/rate of `like` when given; otherwise falls back to
-    Kokoro's native format so silence can stand on its own.
-    """
-    import io
-    import wave
-
-    if like is not None:
-        ch, w, r, _ = _wav_params(like)
-    else:
-        ch, w, r = _KOKORO_CHANNELS, _KOKORO_SAMPWIDTH, _KOKORO_RATE
-    buf = io.BytesIO()
-    with wave.open(buf, "wb") as wf:
-        wf.setnchannels(ch)
-        wf.setsampwidth(w)
-        wf.setframerate(r)
-        wf.writeframes(b"\x00" * int(seconds * r) * ch * w)
-    return buf.getvalue()
-
-
-# *Asterisk* asides (stage directions, e.g. *he sighs*) are NOT spoken — they're
-# replaced by a pause. The pause length scales with the aside's word count so a
-# longer action reads as a longer beat, clamped to [MIN, MAX] seconds. Tune the
-# per-word rate and bounds via the env vars below.
-ASTERISK_PAUSE_PER_WORD = float(os.environ.get("ASTERISK_PAUSE_PER_WORD", "0.35"))
-ASTERISK_PAUSE_MIN_SECONDS = float(os.environ.get("ASTERISK_PAUSE_MIN_SECONDS", "0.6"))
-ASTERISK_PAUSE_MAX_SECONDS = float(os.environ.get("ASTERISK_PAUSE_MAX_SECONDS", "3"))
-
-
-def _asterisk_pause_seconds(aside_text: str) -> float:
-    """How long a silent pause to leave in place of an (unspoken) asterisk aside."""
-    words = len(aside_text.split())
-    secs = words * ASTERISK_PAUSE_PER_WORD
-    return max(ASTERISK_PAUSE_MIN_SECONDS, min(ASTERISK_PAUSE_MAX_SECONDS, secs))
 
 
 def _concat_wavs(wav_blobs: list[bytes]) -> bytes:
@@ -993,9 +972,9 @@ def tts(req: TTSRequest):
     The voice is resolved as: explicit `voice` > the character's stored voice
     (if `character` is given) > DEFAULT_VOICE.
 
-    *Asterisk-wrapped* segments (stage directions, e.g. *he sighs*) are NOT
-    spoken: each is replaced by a silent pause whose length scales with the
-    aside's word count, spliced into the spoken audio in order, as one clip.
+    *Asterisk-wrapped* segments (stage directions, e.g. *he sighs*) are spoken
+    with the same voice as the surrounding text — the asterisk markers are
+    stripped and the inner text is synthesized inline like any other segment.
     """
     text = req.message.strip()
     if not text:
@@ -1011,13 +990,10 @@ def tts(req: TTSRequest):
 
     try:
         clips: list[bytes] = []
-        for chunk, is_ast in segments:
-            if is_ast:
-                # Don't voice the aside — leave a pause in its place.
-                clips.append(_silence_wav(_asterisk_pause_seconds(chunk)))
-            else:
-                clips.append(_synthesize(chunk, voice_id))
-        # A message that's entirely an aside collapses to just silence.
+        for chunk, _is_ast in segments:
+            # Asterisk asides are voiced with the same TTS as the rest of the
+            # text (markers already stripped by _split_asterisk_segments).
+            clips.append(_synthesize(chunk, voice_id))
         audio_bytes = _concat_wavs(clips)
     except HTTPException:
         raise
