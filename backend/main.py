@@ -167,6 +167,30 @@ if DEFAULT_CHAT_PROVIDER not in chat_clients:
 
 print(f"[startup] chat providers={list(chat_clients)} default={DEFAULT_CHAT_PROVIDER}")
 
+
+def _embed_texts(texts):
+    """Embed texts with the local Ollama `nomic-embed-text` model, L2-normalised.
+
+    Mirrors retrieval.ConversationIndex._embed so cosine similarity is a plain
+    dot product. Returns a list of np.float32 vectors, or None on any failure.
+    """
+    import numpy as np
+
+    client = chat_clients.get("ollama")
+    if client is None or not texts:
+        return None
+    try:
+        resp = client.embeddings.create(model=retrieval.EMBED_MODEL, input=texts)
+        out = []
+        for item in resp.data:
+            v = np.asarray(item.embedding, dtype=np.float32)
+            n = np.linalg.norm(v)
+            out.append(v / n if n else v)
+        return out
+    except Exception as exc:
+        print(f"[emoji] embeddings unavailable ({exc}); skipping emoji decoration")
+        return None
+
 # Local STT: load the faster-whisper model once, lazily, on first transcription.
 _whisper_model = None
 
@@ -217,6 +241,7 @@ print(f"[startup] tts default provider={TTS_PROVIDER} default voice={DEFAULT_VOI
 import retrieval
 import memory
 import characters as characters_mod
+import emoji_decor
 
 # The LLM-driven memory steps (query rewrite, chunk rerank, fact extraction) use
 # the local chat provider's client+model. Override the helper provider/model with
@@ -811,7 +836,11 @@ def chat(req: ChatRequest):
         after = len(thread.fact_store.facts)
         if after != before:
             print(f"[chat:{char['id']}] facts: {before} -> {after}")
-    return ChatResponse(reply=reply)
+    # Decorate the reply sent to the client with emojis (~50% of sentences each
+    # get the emoji whose description best matches that sentence). Done after the
+    # clean `reply` is stored above, so history/facts stay emoji-free.
+    decorated = emoji_decor.decorate(reply or "", _embed_texts)
+    return ChatResponse(reply=decorated)
 
 
 @app.post("/api/stt")

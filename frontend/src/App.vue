@@ -17,6 +17,40 @@ const selected = ref(new Set())   // indices (into messages) ticked for deletion
 const deleting = ref(false)
 const selectMode = ref(false)     // when on, per-message deletion checkboxes are shown
 
+// Display-only cleanup for assistant replies: drop newlines, quote marks
+// ("/'/curly) and asterisks, then collapse the whitespace they leave behind.
+function cleanAssistantText(text) {
+  return text
+    .replace(/[\r\n]+/g, ' ')
+    .replace(/["'“”‘’*]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+// Display-only expansion: assistant replies are shown as one bubble per
+// sentence (split on full stops). The backend reply stays a single message;
+// each bubble keeps its source index (`i`) so selection/delete still maps to
+// the real `messages` entry.
+const displayMessages = computed(() => {
+  const out = []
+  messages.value.forEach((m, i) => {
+    if (m.role === 'assistant') {
+      const cleaned = cleanAssistantText(m.content)
+      const parts = cleaned
+        .split('.')
+        .map((s) => s.trim())
+        .filter(Boolean)
+      const bubbles = parts.length ? parts : [cleaned]
+      bubbles.forEach((content, j) => {
+        out.push({ role: m.role, content, i, first: j === 0 })
+      })
+    } else {
+      out.push({ role: m.role, content: m.content, i, first: true })
+    }
+  })
+  return out
+})
+
 const mode = ref('text')          // 'text' (no voice) | 'call' (voice-only)
 const callState = ref('idle')     // 'idle' | 'recording' | 'thinking' | 'speaking'
 const menuOpen = ref(false)       // three-dot overflow menu
@@ -293,7 +327,6 @@ async function send() {
     const data = await res.json()
     messages.value.push({ role: 'assistant', content: data.reply })
     scrollToBottom()
-    speak(data.reply)
   } catch (e) {
     setStatus(`Chat failed: ${e.message}`, true)
   } finally {
@@ -363,27 +396,6 @@ async function deleteSelected() {
     setStatus(`Delete failed: ${e.message}`, true)
   } finally {
     deleting.value = false
-  }
-}
-
-// ---- TTS (uses the active character's voice, resolved server-side) ----
-async function speak(text) {
-  try {
-    if (currentAudio) {
-      currentAudio.pause()
-      currentAudio = null
-    }
-    const res = await fetch('/api/tts', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message: text, character: activeChar.value?.id }),
-    })
-    if (!res.ok) throw new Error(`HTTP ${res.status}`)
-    const blob = await res.blob()
-    currentAudio = new Audio(URL.createObjectURL(blob))
-    currentAudio.play()
-  } catch (e) {
-    setStatus(`TTS failed: ${e.message}`, true)
   }
 }
 
@@ -731,18 +743,18 @@ onUnmounted(() => document.removeEventListener('click', onDocClick))
           Say hi or tap the mic to start talking.
         </div>
         <div
-          v-for="(m, i) in messages"
-          :key="i"
+          v-for="(m, di) in displayMessages"
+          :key="di"
           class="msg"
-          :class="[m.role, { picked: selected.has(i) }]"
+          :class="[m.role, { picked: selected.has(m.i) }]"
         >
           <input
-            v-if="selectMode"
+            v-if="selectMode && m.first"
             type="checkbox"
             class="msg-check"
             title="Select to forget"
-            :checked="selected.has(i)"
-            @change="toggleSelect(i)"
+            :checked="selected.has(m.i)"
+            @change="toggleSelect(m.i)"
           />
           <div class="bubble">{{ m.content }}</div>
         </div>
