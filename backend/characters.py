@@ -31,7 +31,7 @@ INTELLIGENCE_LEVELS = ("low", "medium", "high")
 
 # Intelligence level -> existing chat provider id (see CHAT_MODELS in main.py).
 INTELLIGENCE_PROVIDER = {
-    "low": "ollama-1b",   # Qwen3 1.7B abliterated, fastest + most uncensored
+    "low": "ollama-1b",   # Gemma3 1B abliterated, fastest + most uncensored
     "medium": "ollama-3b",  # Llama 3B
     "high": "ollama",     # Lexi 8B, smartest
 }
