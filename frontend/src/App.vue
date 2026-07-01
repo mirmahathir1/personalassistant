@@ -27,6 +27,14 @@ function cleanAssistantText(text) {
     .trim()
 }
 
+// Split cleaned text into sentences, keeping terminal punctuation with each.
+// Used to drive per-sentence subtitles + TTS in call mode so the caption and
+// the voice stay in sync at sentence granularity.
+function splitSentences(text) {
+  const matches = text.match(/[^.!?]+[.!?]*/g) || []
+  return matches.map((s) => s.trim()).filter(Boolean)
+}
+
 // Display-only expansion: assistant replies are shown as one bubble per
 // sentence (split on full stops). The backend reply stays a single message;
 // each bubble keeps its source index (`i`) so selection/delete still maps to
@@ -53,6 +61,8 @@ const displayMessages = computed(() => {
 
 const mode = ref('text')          // 'text' (no voice) | 'call' (voice-only)
 const callState = ref('idle')     // 'idle' | 'recording' | 'thinking' | 'speaking'
+const subtitle = ref('')          // current spoken sentence, shown under the avatar
+const subtitleRole = ref('assistant') // 'user' (your transcript) | 'assistant' (reply)
 const menuOpen = ref(false)       // three-dot overflow menu
 const contactOpen = ref(false)    // WhatsApp-style "View Contact" side pane
 const confirmDelete = ref(false)  // delete-character confirmation modal
@@ -83,6 +93,16 @@ const messagesEl = ref(null)
 let mediaRecorder = null
 let audioChunks = []
 let currentAudio = null
+
+// ---- Call-mode voice-activity detection (auto listen / 3s silence stop) ----
+let callStream = null            // the live mic MediaStream while a call is open
+let audioCtx = null              // Web Audio context for the analyser
+let analyser = null              // AnalyserNode used to sense speech vs silence
+let vadRAF = null                // requestAnimationFrame handle for the VAD loop
+let silenceTimer = null          // fires after SILENCE_MS of quiet → end the turn
+let speechStarted = false        // has the user actually spoken this turn yet?
+const SILENCE_MS = 3000          // stop listening after 3s of silence
+const SPEECH_RMS = 0.02          // RMS threshold above which we count it as speech
 
 // Pretty one-liner for a character row / contact pane subtitle.
 function charSubtitle(c) {
@@ -134,6 +154,7 @@ function goHome() {
   activeChar.value = null
   contactOpen.value = false
   menuOpen.value = false
+  mode.value = 'text' // triggers the call teardown watcher if a call was open
   if (currentAudio) { currentAudio.pause(); currentAudio = null }
 }
 
@@ -441,29 +462,95 @@ async function transcribe(blob) {
   }
 }
 
-// ---- Call mode: one button records, then auto-transcribe → chat → speak ----
-async function toggleCall() {
-  if (callState.value === 'recording') {
-    mediaRecorder?.stop()
-    return
-  }
-  if (callState.value !== 'idle') return
+// ---- Call mode: hands-free. On entry the mic opens once and stays open for
+// the whole call; each turn auto-records until 3s of silence, then
+// transcribe → chat → speak, then automatically listens again. No buttons. ----
+async function startCall() {
+  if (callStream) return // already in a call
   try {
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
-    mediaRecorder = new MediaRecorder(stream)
-    audioChunks = []
-    mediaRecorder.ondataavailable = (e) => audioChunks.push(e.data)
-    mediaRecorder.onstop = async () => {
-      stream.getTracks().forEach((t) => t.stop())
-      await runCallTurn(new Blob(audioChunks, { type: 'audio/webm' }))
-    }
-    mediaRecorder.start()
-    callState.value = 'recording'
-    setStatus('Listening… tap to stop.')
+    callStream = await navigator.mediaDevices.getUserMedia({ audio: true })
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)()
+    const source = audioCtx.createMediaStreamSource(callStream)
+    analyser = audioCtx.createAnalyser()
+    analyser.fftSize = 2048
+    source.connect(analyser)
+    listen()
   } catch (e) {
     callState.value = 'idle'
     setStatus(`Mic access failed: ${e.message}`, true)
   }
+}
+
+// Tear everything down: stop any recording/playback, close the mic + analyser.
+function endCall() {
+  cancelAnimationFrame(vadRAF)
+  vadRAF = null
+  clearTimeout(silenceTimer)
+  silenceTimer = null
+  if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+    mediaRecorder.onstop = null
+    mediaRecorder.stop()
+  }
+  mediaRecorder = null
+  if (currentAudio) { currentAudio.pause(); currentAudio = null }
+  if (audioCtx) { audioCtx.close(); audioCtx = null }
+  analyser = null
+  if (callStream) { callStream.getTracks().forEach((t) => t.stop()); callStream = null }
+  callState.value = 'idle'
+  subtitle.value = ''
+  setStatus('') // clear any lingering "Listening…" so it doesn't bleed into text mode
+}
+
+// Begin one listening turn: record from the open mic and run a VAD loop that
+// ends the turn after SILENCE_MS of quiet (only once the user has spoken).
+function listen() {
+  if (!callStream) return
+  subtitle.value = '' // clear the last reply's caption when a new turn begins
+  audioChunks = []
+  speechStarted = false
+  mediaRecorder = new MediaRecorder(callStream)
+  mediaRecorder.ondataavailable = (e) => audioChunks.push(e.data)
+  mediaRecorder.onstop = async () => {
+    cancelAnimationFrame(vadRAF)
+    vadRAF = null
+    clearTimeout(silenceTimer)
+    silenceTimer = null
+    // If the user never actually spoke, just listen again rather than
+    // sending an empty clip through STT/chat.
+    if (!speechStarted) {
+      if (callStream) listen()
+      return
+    }
+    await runCallTurn(new Blob(audioChunks, { type: 'audio/webm' }))
+  }
+  mediaRecorder.start()
+  callState.value = 'recording'
+  setStatus('Listening…')
+
+  const buf = new Uint8Array(analyser.fftSize)
+  const tick = () => {
+    if (!analyser || !mediaRecorder || mediaRecorder.state !== 'recording') return
+    analyser.getByteTimeDomainData(buf)
+    // RMS of the centered waveform → rough loudness.
+    let sum = 0
+    for (let i = 0; i < buf.length; i++) {
+      const v = (buf[i] - 128) / 128
+      sum += v * v
+    }
+    const rms = Math.sqrt(sum / buf.length)
+    if (rms > SPEECH_RMS) {
+      speechStarted = true
+      clearTimeout(silenceTimer)
+      silenceTimer = null
+    } else if (speechStarted && !silenceTimer) {
+      // Fell quiet after speaking → start the 3s countdown to end the turn.
+      silenceTimer = setTimeout(() => {
+        if (mediaRecorder && mediaRecorder.state === 'recording') mediaRecorder.stop()
+      }, SILENCE_MS)
+    }
+    vadRAF = requestAnimationFrame(tick)
+  }
+  vadRAF = requestAnimationFrame(tick)
 }
 
 async function runCallTurn(blob) {
@@ -481,12 +568,17 @@ async function runCallTurn(blob) {
     const { text } = await sttRes.json()
     const spoken = text.trim()
     if (!spoken) {
-      setStatus('Did not catch that — tap to try again.')
-      callState.value = 'idle'
+      // Nothing intelligible — just resume listening.
+      if (callStream) listen()
       return
     }
     messages.value.push({ role: 'user', content: spoken })
     scrollToBottom()
+
+    // Show what you said as a subtitle while the character is thinking; it's
+    // replaced by the reply's first sentence once speaking starts.
+    subtitleRole.value = 'user'
+    subtitle.value = spoken
 
     const chatRes = await fetch('/api/chat', {
       method: 'POST',
@@ -501,44 +593,88 @@ async function runCallTurn(blob) {
     messages.value.push({ role: 'assistant', content: reply })
     scrollToBottom()
 
-    callState.value = 'speaking'
+    // Stay in 'thinking' while TTS synthesizes; speakWithSubtitles flips to
+    // 'speaking' only when audio actually starts, so the label matches reality.
     setStatus('')
-    await speakAndWait(reply)
+    await speakWithSubtitles(reply)
   } catch (e) {
     setStatus(`Call failed: ${e.message}`, true)
   } finally {
-    callState.value = 'idle'
+    // Hands-free: after speaking (or on error), automatically listen again
+    // as long as the call is still open.
+    if (callStream) listen()
+    else callState.value = 'idle'
   }
 }
 
-function speakAndWait(text) {
-  return new Promise(async (resolve) => {
-    try {
-      if (currentAudio) {
-        currentAudio.pause()
-        currentAudio = null
-      }
-      const res = await fetch('/api/tts', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: text, character: activeChar.value?.id }),
-      })
-      if (!res.ok) throw new Error(`HTTP ${res.status}`)
-      const blob = await res.blob()
-      currentAudio = new Audio(URL.createObjectURL(blob))
-      currentAudio.onended = () => resolve()
-      currentAudio.onerror = () => resolve()
-      currentAudio.play()
-    } catch (e) {
-      setStatus(`TTS failed: ${e.message}`, true)
-      resolve()
-    }
+// Fetch the TTS clip for one sentence and return a playable object URL (no
+// playback here). Returns null if synthesis fails so one bad clip is skipped
+// rather than aborting the whole reply.
+async function fetchSentenceAudio(sentence) {
+  try {
+    const res = await fetch('/api/tts', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: sentence, character: activeChar.value?.id }),
+    })
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    const blob = await res.blob()
+    return URL.createObjectURL(blob)
+  } catch (e) {
+    setStatus(`TTS failed: ${e.message}`, true)
+    return null
+  }
+}
+
+// Play one already-fetched clip to completion. Resolves on end or error so a
+// single bad clip doesn't stall the turn.
+function playAudioUrl(url) {
+  return new Promise((resolve) => {
+    currentAudio = new Audio(url)
+    currentAudio.onended = () => resolve()
+    currentAudio.onerror = () => resolve()
+    currentAudio.play()
   })
 }
 
+// Speak a reply with synced per-sentence subtitles. First synthesize every
+// sentence's TTS up front (in parallel); only once ALL clips are ready do we
+// start playing them one by one, showing each sentence as its clip plays. This
+// makes playback gapless — no waiting on TTS between sentences.
+async function speakWithSubtitles(text) {
+  if (currentAudio) { currentAudio.pause(); currentAudio = null }
+  const sentences = splitSentences(cleanAssistantText(text))
+  if (!sentences.length) return
+
+  // Fetch all clips concurrently and wait for the whole batch.
+  const clips = await Promise.all(sentences.map(fetchSentenceAudio))
+  // The call may have been ended while TTS was in flight.
+  if (!callStream) {
+    clips.forEach((u) => u && URL.revokeObjectURL(u))
+    return
+  }
+
+  // Clips are ready — now audio actually begins, so show "Speaking…".
+  callState.value = 'speaking'
+  subtitleRole.value = 'assistant'
+
+  let i = 0
+  for (; i < sentences.length; i++) {
+    if (!callStream) break // call ended mid-playback
+    subtitle.value = sentences[i]
+    if (clips[i]) {
+      await playAudioUrl(clips[i])
+      URL.revokeObjectURL(clips[i])
+    }
+  }
+  // Free any clips not yet played (e.g. the call ended mid-reply).
+  for (let j = i; j < clips.length; j++) if (clips[j]) URL.revokeObjectURL(clips[j])
+  subtitle.value = ''
+}
+
 const callLabel = {
-  idle: 'Tap to talk',
-  recording: 'Listening… tap to stop',
+  idle: 'Starting…',
+  recording: 'Listening…',
   thinking: 'Thinking…',
   speaking: 'Speaking…',
 }
@@ -560,12 +696,22 @@ function onDocClick() {
   menuOpen.value = false
 }
 
+// Entering call mode opens the mic and starts hands-free listening; leaving it
+// (switching to text, going home, closing the chat) tears the call down.
+watch(mode, (m, prev) => {
+  if (m === 'call') startCall()
+  else if (prev === 'call') endCall()
+})
+
 onMounted(async () => {
   document.addEventListener('click', onDocClick)
   await Promise.all([loadVoiceLabels(), loadCharacters()])
 })
 
-onUnmounted(() => document.removeEventListener('click', onDocClick))
+onUnmounted(() => {
+  document.removeEventListener('click', onDocClick)
+  endCall()
+})
 </script>
 
 <template>
@@ -777,7 +923,9 @@ onUnmounted(() => document.removeEventListener('click', onDocClick))
         <button class="delete-cancel" @click="toggleSelectMode">Cancel</button>
       </div>
 
-      <div v-if="status" class="status" :class="{ error: statusError }">{{ status }}</div>
+      <!-- Text-mode only: in call mode the state is shown by the call-hint, so
+           the status bar would just duplicate "Listening…"/"Thinking…" on top. -->
+      <div v-if="mode === 'text' && status" class="status" :class="{ error: statusError }">{{ status }}</div>
 
       <div v-if="mode === 'text'" class="composer">
         <textarea
@@ -795,17 +943,26 @@ onUnmounted(() => document.removeEventListener('click', onDocClick))
       </div>
 
       <div v-else class="call-panel">
-        <button
-          class="call-btn"
-          :class="callState"
-          :disabled="callState === 'thinking' || callState === 'speaking'"
-          @click="toggleCall"
-        >
-          <svg viewBox="0 0 24 24" width="34" height="34" aria-hidden="true">
-            <path fill="currentColor" d="M12 14a3 3 0 0 0 3-3V5a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V21h2v-3.08A7 7 0 0 0 19 11h-2z" />
+        <div class="call-avatar" :class="callState">
+          <svg viewBox="0 0 212 212" width="140" height="140" aria-hidden="true">
+            <path fill="currentColor" d="M106 0C47.5 0 0 47.5 0 106s47.5 106 106 106 106-47.5 106-106S164.5 0 106 0zm0 53c16.6 0 30 13.4 30 30s-13.4 30-30 30-30-13.4-30-30 13.4-30 30-30zm0 138c-25 0-47.2-12.1-61-30.7 9.8-17.4 28.4-29.3 49.8-30.2a44 44 0 0 0 22.4 0c21.4.9 40 12.8 49.8 30.2-13.8 18.6-36 30.7-61 30.7z" />
+          </svg>
+        </div>
+        <div class="call-name">{{ activeChar?.name }}</div>
+        <div class="call-hint">{{ callLabel[callState] }}</div>
+        <div class="call-subtitle">
+          <transition name="subtitle-fade" mode="out-in">
+            <div v-if="subtitle" :key="subtitle" class="subtitle-line" :class="subtitleRole">
+              <span class="subtitle-who">{{ subtitleRole === 'user' ? 'You' : activeChar?.name }}</span>
+              <p class="subtitle-text">{{ subtitle }}</p>
+            </div>
+          </transition>
+        </div>
+        <button class="call-end" title="End call" @click="mode = 'text'">
+          <svg viewBox="0 0 24 24" width="30" height="30" aria-hidden="true">
+            <path fill="currentColor" d="M12 9c-1.6 0-3.15.25-4.6.72v3.1c0 .39-.23.74-.56.9-.98.49-1.87 1.12-2.66 1.85-.18.18-.43.28-.7.28-.28 0-.53-.11-.71-.29L.29 13.08a.99.99 0 0 1-.29-.7c0-.28.11-.53.29-.71C3.34 8.78 7.46 7 12 7s8.66 1.78 11.71 4.67c.18.18.29.43.29.71 0 .27-.11.52-.29.7l-1.81 1.87c-.18.18-.43.29-.71.29-.27 0-.52-.1-.7-.28a11.27 11.27 0 0 0-2.66-1.85.998.998 0 0 1-.56-.9v-3.1C15.15 9.25 13.6 9 12 9z" transform="rotate(135 12 12)" />
           </svg>
         </button>
-        <div class="call-hint">{{ callLabel[callState] }}</div>
       </div>
     </template>
 

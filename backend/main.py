@@ -916,6 +916,41 @@ def _tts_kokoro(text: str, voice_id: str) -> bytes:
 # Matches *...* spans (non-greedy, no nested asterisks, must contain something).
 _ASTERISK_RE = re.compile(r"\*([^*]+?)\*")
 
+# Emoji / pictographic codepoint ranges. Replies are decorated with emojis for
+# display (see emoji_decor), but Kokoro would try to voice them, so we strip
+# them before synthesis. Covers the emoji blocks plus common modifiers
+# (variation selectors, skin-tone modifiers, ZWJ) so joined sequences vanish
+# cleanly rather than leaving stray glyphs.
+_EMOJI_RE = re.compile(
+    "["
+    "\U0001F300-\U0001FAFF"  # symbols & pictographs, supplemental, extended-A
+    "\U0001F000-\U0001F0FF"  # mahjong/domino/playing cards
+    "\U00002600-\U000027BF"  # misc symbols & dingbats
+    "\U0001F1E6-\U0001F1FF"  # regional indicators (flags)
+    "\U00002300-\U000023FF"  # misc technical (⌚ ⏰ etc.)
+    "\U0000FE00-\U0000FE0F"  # variation selectors
+    "\U0001F3FB-\U0001F3FF"  # skin-tone modifiers
+    "\U00002190-\U000021FF"  # arrows sometimes emoji-presented
+    "\U00002B00-\U00002BFF"  # misc symbols & arrows (⭐ etc.)
+    "\U0000200D"             # zero-width joiner
+    "\U000020E3"             # combining enclosing keycap
+    "]+",
+    flags=re.UNICODE,
+)
+
+
+def _strip_emojis(text: str) -> str:
+    """Remove emojis/pictographs and collapse the whitespace they leave behind.
+
+    Emojis are decorated in just before terminal punctuation, so also drop any
+    space stranded before punctuation once the emoji is gone (e.g.
+    "how are you 🙂?" -> "how are you?").
+    """
+    without = _EMOJI_RE.sub("", text)
+    without = re.sub(r"\s+", " ", without)
+    without = re.sub(r"\s+([,.!?;:])", r"\1", without)
+    return without.strip()
+
 
 def _split_asterisk_segments(text: str) -> list[tuple[str, bool]]:
     """Split text into (chunk, is_asterisk) pieces, in order.
@@ -1020,7 +1055,7 @@ def tts(req: TTSRequest):
     with the same voice as the surrounding text — the asterisk markers are
     stripped and the inner text is synthesized inline like any other segment.
     """
-    text = req.message.strip()
+    text = _strip_emojis(req.message)
     if not text:
         raise HTTPException(status_code=400, detail="Empty text")
 

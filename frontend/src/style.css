@@ -617,45 +617,115 @@ textarea:focus {
   background-image: radial-gradient(rgba(255, 255, 255, 0.018) 1px, transparent 1px);
   background-size: 22px 22px;
 }
-.call-btn {
-  width: 96px;
-  height: 96px;
+.call-avatar {
+  width: 168px;
+  height: 168px;
   border-radius: 50%;
-  border: none;
-  background: var(--wa-green);
-  color: #0b141a;
-  font-size: 38px;
-  cursor: pointer;
+  background: var(--wa-panel-2);
+  color: var(--wa-muted);
   display: flex;
   align-items: center;
   justify-content: center;
-  box-shadow: 0 6px 24px rgba(0, 168, 132, 0.35);
-  transition: transform 0.1s, background 0.15s;
+  box-shadow: 0 0 0 0 rgba(0, 168, 132, 0.4);
+  transition: color 0.2s, box-shadow 0.2s;
 }
-.call-btn:hover:not(:disabled) {
-  transform: scale(1.04);
+/* Listening: a soft green pulsing ring. */
+.call-avatar.recording {
+  color: var(--wa-green);
+  animation: ring 1.8s ease-out infinite;
 }
-.call-btn:disabled {
-  cursor: default;
+/* Thinking: dim, no motion. */
+.call-avatar.thinking {
+  color: var(--wa-muted);
 }
-.call-btn.recording {
-  background: var(--wa-danger);
-  color: #fff;
-  box-shadow: 0 6px 24px rgba(241, 92, 109, 0.45);
-  animation: pulse 1.2s infinite;
+/* Speaking: gentle green glow that breathes. */
+.call-avatar.speaking {
+  color: var(--wa-green);
+  animation: glow 1.6s ease-in-out infinite;
 }
-.call-btn.thinking,
-.call-btn.speaking {
-  background: var(--wa-panel-2);
+@keyframes ring {
+  0%   { box-shadow: 0 0 0 0 rgba(0, 168, 132, 0.45); }
+  70%  { box-shadow: 0 0 0 24px rgba(0, 168, 132, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(0, 168, 132, 0); }
+}
+@keyframes glow {
+  0%, 100% { box-shadow: 0 0 24px 4px rgba(0, 168, 132, 0.25); }
+  50%      { box-shadow: 0 0 40px 10px rgba(0, 168, 132, 0.5); }
+}
+.call-name {
   color: var(--wa-text);
-  box-shadow: none;
-}
-.call-btn.speaking {
-  animation: pulse 1.6s infinite;
+  font-size: 22px;
+  font-weight: 600;
 }
 .call-hint {
   color: var(--wa-muted);
   font-size: 14px;
+}
+/* Per-sentence caption under the avatar, in sync with the spoken sentence.
+   Fixed min-height so the layout doesn't jump as sentences appear/clear. */
+.call-subtitle {
+  min-height: 60px;
+  max-width: 34ch;
+  margin-top: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.subtitle-line {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+}
+.subtitle-who {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--wa-muted);
+}
+.subtitle-line.user .subtitle-who {
+  color: var(--wa-green);
+}
+.subtitle-text {
+  margin: 0;
+  text-align: center;
+  color: var(--wa-text);
+  font-size: 18px;
+  line-height: 1.4;
+}
+/* Your own transcript (shown while the character thinks) reads a touch dimmer
+   than the character's spoken lines. */
+.subtitle-line.user .subtitle-text {
+  color: var(--wa-muted);
+}
+.subtitle-fade-enter-active,
+.subtitle-fade-leave-active {
+  transition: opacity 0.18s ease;
+}
+.subtitle-fade-enter-from,
+.subtitle-fade-leave-to {
+  opacity: 0;
+}
+/* WhatsApp-style red hang-up button; ends the call → back to text mode. */
+.call-end {
+  margin-top: 22px;
+  width: 64px;
+  height: 64px;
+  border-radius: 50%;
+  border: none;
+  background: var(--wa-danger);
+  color: #fff;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 6px 24px rgba(241, 92, 109, 0.45);
+  transition: transform 0.1s, filter 0.15s;
+}
+.call-end:hover {
+  transform: scale(1.06);
+  filter: brightness(1.08);
 }
 
 /* Status line: only rendered (v-if) when there's a message — sits on the chat
